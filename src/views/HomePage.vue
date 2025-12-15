@@ -138,6 +138,8 @@
                   <el-descriptions-item label="提议内容">{{ sessionInfo.config.proposalContent || '无' }}</el-descriptions-item>
                   <el-descriptions-item label="消息传递率">{{ sessionInfo.config.messageDeliveryRate }}%</el-descriptions-item>
                   <el-descriptions-item label="状态">{{ sessionInfo.status }}</el-descriptions-item>
+                  <el-descriptions-item label="当前视图">{{ currentView }}</el-descriptions-item>
+                  <el-descriptions-item label="当前 Leader">节点 {{ currentLeader }}</el-descriptions-item>
                 </el-descriptions>
                 
                 <div class="qr-section">
@@ -233,6 +235,7 @@
               :byzantineNodes="formData.faultyNodes"
               :simulationResult="currentSimulation"
               :proposalValue="formData.proposalValue"
+              :currentLeader="currentLeader"
             />
           </div>
           
@@ -308,6 +311,9 @@ export default {
       ]
     }
     
+    const currentView = computed(() => sessionInfo.value?.currentView ?? 0)
+    const currentLeader = computed(() => sessionInfo.value?.leaderId ?? 0)
+
     const nodeLinks = computed(() => {
       if (!sessionInfo.value) return []
       

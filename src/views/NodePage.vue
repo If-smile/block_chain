@@ -12,7 +12,7 @@
           </div>
           <div class="session-info">
             <span>会话: {{ sessionId }}</span>
-            <el-tag type="primary">第{{ currentRound }}轮</el-tag>
+            <el-tag type="primary">当前视图: {{ currentView }}</el-tag>
             <el-button size="small" @click="leaveSession" type="danger">离开会话</el-button>
           </div>
         </div>
@@ -38,7 +38,7 @@
               <template #header>
                 <div class="card-header">
                   <span>共识进度</span>
-                  <el-tag type="primary" size="large" effect="dark">第 {{ currentRound }} 轮</el-tag>
+                  <el-tag type="primary" size="large" effect="dark">当前视图: {{ currentView }}</el-tag>
                 </div>
               </template>
               
@@ -52,10 +52,10 @@
                   />
                   <div class="phase-steps">
                     <el-steps :active="phaseStep" finish-status="success" simple>
-                      <el-step title="提议" description="发起提议" />
-                      <el-step title="准备" description="验证提议" />
-                      <el-step title="提交" description="确认提议" />
-                      <el-step title="完成" description="达成共识" />
+                      <el-step title="Prepare" description="准备阶段" />
+                      <el-step title="Pre-Commit" description="预提交阶段" />
+                      <el-step title="Commit" description="提交阶段" />
+                      <el-step title="Decide" description="决定阶段" />
                     </el-steps>
                   </div>
                 </div>
@@ -64,6 +64,8 @@
                 <div class="current-status">
                   <h4>当前状态</h4>
                   <el-descriptions :column="1" border size="small">
+                    <el-descriptions-item label="当前视图">{{ currentView }}</el-descriptions-item>
+                    <el-descriptions-item label="当前 Leader">节点 {{ currentLeaderId }}</el-descriptions-item>
                     <el-descriptions-item label="当前阶段">{{ getPhaseDisplayName(currentPhase) }}</el-descriptions-item>
                     <el-descriptions-item label="已接受内容">{{ getAcceptedContentDisplay() }}</el-descriptions-item>
                     <el-descriptions-item label="网络可靠性">{{ sessionConfig.messageDeliveryRate ?? '未设置' }}%</el-descriptions-item>
@@ -343,7 +345,9 @@ const sessionConfig = ref({
 const connectedNodes = ref([])
 const currentPhase = ref('pre-prepare')
 const phaseStep = ref(0)
-const currentRound = ref(1)
+const currentRound = ref(1) // 兼容旧逻辑
+const currentView = ref(0)
+const currentLeaderId = ref(0)
 const acceptedValue = ref(null)
 const receivedMessages = ref([])
 
@@ -429,12 +433,21 @@ const connectToServer = () => {
   socket.value.on('phase_update', (data) => {
     currentPhase.value = data.phase
     phaseStep.value = data.step
+    if (data.view !== undefined) {
+      currentView.value = data.view
+    }
+    if (data.leader !== undefined) {
+      currentLeaderId.value = data.leader
+    }
     refreshTopology()
   })
   
   socket.value.on('new_round', (data) => {
     console.log('进入新一轮共识:', data)
     currentRound.value = data.round
+    if (data.view !== undefined) {
+      currentView.value = data.view
+    }
     currentPhase.value = data.phase
     phaseStep.value = data.step
     receivedMessages.value = []  // 清空消息列表
@@ -600,10 +613,13 @@ const getPhaseStatus = () => {
 
 const getPhaseDisplayName = (phase) => {
   const names = {
-    'pre-prepare': '提议阶段',
-    'prepare': '准备阶段',
-    'commit': '提交阶段',
-    'reply': '完成阶段'
+    'new-view': 'New-View 阶段',
+    'pre-prepare': 'Prepare 阶段', // 兼容旧命名
+    'prepare': 'Prepare 阶段',
+    'pre-commit': 'Pre-Commit 阶段',
+    'commit': 'Commit 阶段',
+    'decide': 'Decide 阶段',
+    'reply': 'Decide 阶段' // 兼容旧命名
   }
   return names[phase] || phase
 }

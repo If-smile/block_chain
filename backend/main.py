@@ -73,7 +73,9 @@ def create_session(config: SessionConfig) -> SessionInfo:
         "status": "waiting",
         "phase": "waiting",
         "phase_step": 0,
-        "current_round": 1,  # 当前共识轮次
+        "current_round": 1,  # 当前共识轮次（保留用于兼容旧逻辑）
+        "current_view": 0,   # 当前视图编号（HotStuff）
+        "leader_id": 0,      # 当前视图的Leader ID
         "connected_nodes": [],
         "robot_nodes": [],  # 机器人节点列表
         "human_nodes": [],  # 人类节点列表（拜占庭节点）
@@ -82,13 +84,21 @@ def create_session(config: SessionConfig) -> SessionInfo:
         "messages": {
             "pre_prepare": [],
             "prepare": [],
-            "commit": []
+            "commit": [],
+            "vote": [],
+            "qc": []
         },
         "node_states": {},
+        "pending_votes": {},  # {(view, phase): set(voter_ids)}
+        "network_stats": {    # 通信复杂度统计
+            "total_messages_sent": 0,  # 本轮产生的总网络包数量
+            "phases_count": 0          # 经历的阶段数（HotStuff阶段流转次数）
+        },
         "consensus_result": None,
         "consensus_history": [],  # 共识历史记录
         "created_at": datetime.now().isoformat()
     }
+    session["leader_id"] = session["current_view"] % config.nodeCount
     
     sessions[session_id] = session
     connected_nodes[session_id] = []
@@ -117,6 +127,27 @@ def create_session(config: SessionConfig) -> SessionInfo:
 
 def get_session(session_id: str) -> Optional[Dict[str, Any]]:
     return sessions.get(session_id)
+
+def get_current_leader(session: Dict[str, Any]) -> int:
+    """返回当前视图的Leader"""
+    return session["current_view"] % session["config"]["nodeCount"]
+
+def get_quorum_threshold(session: Dict[str, Any]) -> int:
+    """HotStuff 需要 2f+1 票"""
+    n = session["config"]["nodeCount"]
+    f = (n - 1) // 3
+    return 2 * f + 1
+
+def get_next_phase(phase: str) -> str:
+    """HotStuff 阶段流转"""
+    mapping = {
+        "new-view": "prepare",
+        "prepare": "pre-commit",
+        "pre-commit": "commit",
+        "commit": "decide",
+        "decide": "decide"
+    }
+    return mapping.get(phase, "prepare")
 
 def is_connection_allowed(i: int, j: int, n: int, topology: str, n_value: int) -> bool:
     """检查两个节点之间是否允许连接"""
@@ -158,6 +189,38 @@ def should_deliver_message(session_id: str) -> bool:
     
     # 生成随机数，如果小于传达概率则发送消息
     return random.random() * 100 < delivery_rate
+
+def count_message_sent(session_id: str, is_broadcast: bool = True, target_count: Optional[int] = None):
+    """统计发送的消息数量
+    
+    参数:
+        session_id: 会话ID
+        is_broadcast: 是否为广播消息（True=广播，False=单播）
+        target_count: 目标节点数量（如果为None，则使用总节点数-1）
+    """
+    session = get_session(session_id)
+    if not session:
+        return
+    
+    # 确保network_stats存在
+    if "network_stats" not in session:
+        session["network_stats"] = {
+            "total_messages_sent": 0,
+            "phases_count": 0
+        }
+    
+    if is_broadcast:
+        # 广播消息：发送给所有其他节点（N-1）
+        if target_count is None:
+            n = session["config"]["nodeCount"]
+            message_count = max(n - 1, 0)
+        else:
+            message_count = max(int(target_count), 0)
+    else:
+        # 单播消息：只发送给一个节点
+        message_count = 1
+    
+    session["network_stats"]["total_messages_sent"] += message_count
 
 # HTTP路由
 @app.post("/api/sessions")
@@ -504,30 +567,36 @@ async def send_prepare(sid, data):
     if not session:
         return
     
-    # 记录消息
-    message = {
+    leader_id = get_current_leader(session)
+    leader_sid = node_sockets.get(session_id, {}).get(leader_id)
+    
+    # 构造投票（VOTE）消息，只发送给当前Leader
+    vote_message = {
         "from": node_id,
-        "to": "all",
-        "type": "prepare",
+        "to": leader_id,
+        "type": "vote",
         "value": value,
         "phase": "prepare",
-        "round": session["current_round"],  # 添加轮次信息
+        "view": session["current_view"],
+        "round": session["current_round"],  # 兼容旧逻辑
+        "qc": data.get("qc"),
         "timestamp": datetime.now().isoformat(),
         "tampered": False,
-        "byzantine": data.get("byzantine", False)  # 标记是否为拜占庭攻击消息
+        "byzantine": data.get("byzantine", False)
     }
     
-    session["messages"]["prepare"].append(message)
+    session["messages"]["vote"].append(vote_message)
     
-    # 根据消息传达概率决定是否广播消息
-    if should_deliver_message(session_id):
-        await sio.emit('message_received', message, room=session_id)
-        print(f"节点 {node_id} 的准备消息已发送 (传达概率: {session['config'].get('messageDeliveryRate', 100)}%)")
+    # 单播给Leader（不广播）
+    if leader_sid:
+        count_message_sent(session_id, is_broadcast=False)
+        await sio.emit('message_received', vote_message, room=leader_sid)
+        print(f"节点 {node_id} 向 Leader {leader_id} 发送 VOTE(prepare)")
     else:
-        print(f"节点 {node_id} 的准备消息被丢弃 (传达概率: {session['config'].get('messageDeliveryRate', 100)}%)")
+        print(f"Leader {leader_id} 不在线，缓存 VOTE")
     
-    # 检查准备阶段是否完成
-    await check_prepare_phase(session_id)
+    # 直接在后端处理投票累积
+    await handle_vote(session_id, vote_message)
 
 @sio.event
 async def send_commit(sid, data):
@@ -540,27 +609,36 @@ async def send_commit(sid, data):
     if not session:
         return
     
-    # 记录消息
-    message = {
+    leader_id = get_current_leader(session)
+    leader_sid = node_sockets.get(session_id, {}).get(leader_id)
+    
+    # 构造投票（VOTE）消息，只发送给当前Leader
+    vote_message = {
         "from": node_id,
-        "to": "all",
-        "type": "commit",
+        "to": leader_id,
+        "type": "vote",
         "value": value,
         "phase": "commit",
-        "round": session["current_round"],  # 添加轮次信息
+        "view": session["current_view"],
+        "round": session["current_round"],  # 兼容旧逻辑
+        "qc": data.get("qc"),
         "timestamp": datetime.now().isoformat(),
         "tampered": False,
-        "byzantine": data.get("byzantine", False)  # 标记是否为拜占庭攻击消息
+        "byzantine": data.get("byzantine", False)
     }
     
-    session["messages"]["commit"].append(message)
+    session["messages"]["vote"].append(vote_message)
     
-    # 根据消息传达概率决定是否广播消息
-    if should_deliver_message(session_id):
-        await sio.emit('message_received', message, room=session_id)
-        print(f"节点 {node_id} 的确认消息已发送 (传达概率: {session['config'].get('messageDeliveryRate', 100)}%)")
+    # 单播给Leader（不广播）
+    if leader_sid:
+        count_message_sent(session_id, is_broadcast=False)
+        await sio.emit('message_received', vote_message, room=leader_sid)
+        print(f"节点 {node_id} 向 Leader {leader_id} 发送 VOTE(commit)")
     else:
-        print(f"节点 {node_id} 的确认消息被丢弃 (传达概率: {session['config'].get('messageDeliveryRate', 100)}%)")
+        print(f"Leader {leader_id} 不在线，缓存 VOTE")
+    
+    # 直接在后端处理投票累积
+    await handle_vote(session_id, vote_message)
     
 
 @sio.event
@@ -583,6 +661,8 @@ async def send_message(sid, data):
         "type": message_type,
         "value": value,
         "phase": session.get("phase", "waiting"),
+        "view": session.get("current_view", 0),  # HotStuff视图
+        "qc": data.get("qc"),                    # Quorum Certificate
         "timestamp": datetime.now().isoformat(),
         "tampered": False
     }
@@ -598,21 +678,88 @@ async def send_message(sid, data):
             session["messages"]["other"] = []
         session["messages"]["other"].append(message)
     
-    # 根据消息传达概率决定是否广播消息
-    if should_deliver_message(session_id):
-        await sio.emit('message_received', message, room=session_id)
-        print(f"节点 {node_id} 的消息已发送 (传达概率: {session['config'].get('messageDeliveryRate', 100)}%)")
+    # 根据消息类型决定发送范围（HotStuff：非投票消息由Leader广播，投票单播给Leader）
+    if message_type == "vote":
+        leader_id = get_current_leader(session)
+        leader_sid = node_sockets.get(session_id, {}).get(leader_id)
+        if leader_sid:
+            count_message_sent(session_id, is_broadcast=False)
+            await sio.emit('message_received', message, room=leader_sid)
+            print(f"节点 {node_id} 向 Leader {leader_id} 发送 VOTE")
+        else:
+            print(f"Leader {leader_id} 不在线，缓存 VOTE")
+        await handle_vote(session_id, message)
     else:
-        print(f"节点 {node_id} 的消息被丢弃 (传达概率: {session['config'].get('messageDeliveryRate', 100)}%)")
-    
-    # 如果是准备或提交消息，检查阶段完成情况
-    if message_type == "prepare":
-        await check_prepare_phase(session_id)
-    elif message_type == "commit":
-        await check_commit_phase(session_id)
-    
-    print(f"节点 {node_id} 发送消息: {message_type} 到 {target}")
+        # 其他消息默认广播给所有节点
+        if should_deliver_message(session_id):
+            await sio.emit('message_received', message, room=session_id)
+            print(f"节点 {node_id} 的消息已发送 (传达概率: {session['config'].get('messageDeliveryRate', 100)}%)")
+        else:
+            print(f"节点 {node_id} 的消息被丢弃 (传达概率: {session['config'].get('messageDeliveryRate', 100)}%)")
 
+
+async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
+    """Leader 汇总 VOTE，达到阈值生成 QC 并广播下一阶段"""
+    session = get_session(session_id)
+    if not session:
+        return
+    
+    view = vote_message.get("view", session.get("current_view", 0))
+    phase = vote_message.get("phase", "prepare")
+    voter = vote_message.get("from")
+    value = vote_message.get("value")
+    
+    leader_id = get_current_leader(session)
+    if vote_message.get("to") != leader_id:
+        print(f"投票目标不是当前Leader，忽略: {vote_message}")
+        return
+    
+    key = (view, phase, value)
+    pending = session.setdefault("pending_votes", {})
+    voters = pending.setdefault(key, set())
+    voters.add(voter)
+    
+    threshold = get_quorum_threshold(session)
+    if len(voters) < threshold:
+        print(f"投票累积中: phase={phase}, view={view}, 收到 {len(voters)}/{threshold}")
+        return
+    
+    qc = {
+        "phase": phase,
+        "view": view,
+        "signers": list(voters),
+        "value": value
+    }
+    session["messages"]["qc"].append(qc)
+    
+    next_phase = get_next_phase(phase)
+    session["phase"] = next_phase
+    session["phase_step"] += 1
+    
+    qc_message = {
+        "from": leader_id,
+        "to": "all",
+        "type": "qc",
+        "phase": phase,
+        "next_phase": next_phase,
+        "view": view,
+        "qc": qc,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    # Leader 广播 QC 到所有节点
+    count_message_sent(session_id, is_broadcast=True)
+    await sio.emit('message_received', qc_message, room=session_id)
+    await sio.emit('phase_update', {
+        "phase": next_phase,
+        "step": session["phase_step"],
+        "leader": leader_id,
+        "view": view
+    }, room=session_id)
+    
+    print(f"Leader {leader_id} 收到 {len(voters)} 票，生成QC并进入 {next_phase}")
+    
+    pending[key] = voters
 @sio.event
 async def choose_normal_consensus(sid, data):
     """处理人类节点选择正常共识"""
@@ -896,6 +1043,29 @@ async def finalize_consensus(session_id: str, status: str = "共识完成", desc
     
     session["consensus_result"] = consensus_result
     
+    # ================= 通信复杂度统计报告（HotStuff vs PBFT） =================
+    network_stats = session.get("network_stats", {})
+    actual_messages = network_stats.get("total_messages_sent", 0)
+    n = config["nodeCount"]
+    pbft_theoretical = 2 * n * n     # 2 * N^2
+    hotstuff_theoretical = 4 * n     # 4 * N
+    optimization_ratio = pbft_theoretical / actual_messages if actual_messages > 0 else 0.0
+    
+    print("\n" + "=" * 60)
+    print("📊 HotStuff 通信复杂度分析报告")
+    print("=" * 60)
+    print(f"[算法] 当前算法类型: HotStuff")
+    print(f"[配置] 节点总数 N = {n}")
+    print(f"[实测] 实际产生消息数: {actual_messages}")
+    print(f"[对比] PBFT 理论预期消息数: {pbft_theoretical} (≈ 2 × N^2)")
+    print(f"[对比] HotStuff 理论预期消息数: {hotstuff_theoretical} (≈ 4 × N)")
+    print("-" * 60)
+    if actual_messages > 0:
+        print(f"🚀 结论: 通信复杂度相对于 PBFT 理论值降低约 {optimization_ratio:.2f} 倍")
+    else:
+        print("⚠️  警告: 未统计到任何共识消息，无法计算优化倍数")
+    print("=" * 60 + "\n")
+    
     # 广播共识结果
     print(f"准备发送共识结果: {consensus_result}")
     await sio.emit('consensus_result', consensus_result, room=session_id)
@@ -957,6 +1127,11 @@ async def start_next_round(session_id: str):
     session["phase"] = "pre-prepare"
     session["phase_step"] = 0
     session["consensus_result"] = None
+    # 重置网络统计（每轮重新开始统计）
+    session["network_stats"] = {
+        "total_messages_sent": 0,
+        "phases_count": 0
+    }
     
     # 不再清空消息，保留历史轮次的消息
     # 所有消息通过 round 字段区分不同轮次
@@ -1112,14 +1287,16 @@ async def robot_send_pre_prepare(session_id: str):
         print(f"提议者 {proposer_id} 是人类节点，等待人类操作")
         return
     
-    # 发送预准备消息
+    # 发送预准备消息（Leader广播Proposal）
     message = {
         "from": proposer_id,
         "to": "all",
         "type": "pre_prepare",
         "value": config["proposalValue"],
         "phase": "pre-prepare",
-        "round": session["current_round"],  # 添加轮次信息
+        "view": session["current_view"],     # HotStuff视图
+        "round": session["current_round"],  # 兼容旧逻辑
+        "qc": None,                         # 初始无QC
         "timestamp": datetime.now().isoformat(),
         "tampered": False,
         "isRobot": True
@@ -1127,7 +1304,8 @@ async def robot_send_pre_prepare(session_id: str):
     
     session["messages"]["pre_prepare"].append(message)
     
-    # 广播消息
+    # 广播消息：Leader -> All
+    count_message_sent(session_id, is_broadcast=True)
     await sio.emit('message_received', message, room=session_id)
     
     print(f"机器人提议者 {proposer_id} 发送了预准备消息: {config['proposalValue']}")
@@ -1159,102 +1337,77 @@ async def robot_send_pre_prepare(session_id: str):
     asyncio.create_task(robot_send_prepare_messages(session_id))
 
 async def robot_send_prepare_messages(session_id: str):
-    """机器人节点自动发送准备消息"""
+    """机器人节点自动发送准备阶段的VOTE（改为单播Leader）"""
     session = get_session(session_id)
     if not session:
         return
     
     config = session["config"]
-    current_round = session["current_round"]
+    current_view = session["current_view"]
     
-    # 等待10秒后发送准备消息
-    print(f"机器人节点将在10秒后发送准备消息")
+    # 等待10秒后发送准备阶段投票
+    print(f"机器人节点将在10秒后发送 VOTE(prepare) 给 Leader")
     await asyncio.sleep(10)
     
     session = get_session(session_id)
     if not session:
         return
     
-    # 检查轮次是否改变，如果改变则放弃发送
-    if session["current_round"] != current_round:
-        print(f"轮次已改变（{current_round} -> {session['current_round']}），放弃发送准备消息")
+    # 检查视图是否改变
+    if session["current_view"] != current_view:
+        print(f"视图已改变（{current_view} -> {session['current_view']}），放弃发送投票")
         return
     
-    # 所有机器人验证者（除了节点0）发送准备消息
+    # 所有机器人验证者（除了Leader）发送准备阶段VOTE
     for robot_id in session["robot_nodes"]:
-        if robot_id == 0:  # 提议者不发送准备消息
+        if robot_id == get_current_leader(session):  # Leader不发送投票
             continue
         
         if session["robot_node_states"][robot_id]["sent_prepare"]:
             continue  # 已经发送过了
         
-        # 调用发送准备消息的函数
+        # 调用发送投票的函数
         await handle_robot_prepare(session_id, robot_id, config["proposalValue"])
         session["robot_node_states"][robot_id]["sent_prepare"] = True
 
 async def handle_robot_prepare(session_id: str, robot_id: int, value: int):
-    """处理机器人节点的准备消息"""
+    """处理机器人节点的准备阶段投票（VOTE -> Leader 单播）"""
     session = get_session(session_id)
     if not session:
         return
     
-    message = {
+    leader_id = get_current_leader(session)
+    leader_sid = node_sockets.get(session_id, {}).get(leader_id)
+    
+    vote_message = {
         "from": robot_id,
-        "to": "all",
-        "type": "prepare",
+        "to": leader_id,
+        "type": "vote",
         "value": value,
         "phase": "prepare",
-        "round": session["current_round"],  # 添加轮次信息
+        "view": session["current_view"],
+        "round": session["current_round"],  # 兼容旧逻辑
+        "qc": None,
         "timestamp": datetime.now().isoformat(),
         "tampered": False,
         "isRobot": True
     }
     
-    session["messages"]["prepare"].append(message)
+    session["messages"]["vote"].append(vote_message)
     
-    # 广播消息
-    if should_deliver_message(session_id):
-        await sio.emit('message_received', message, room=session_id)
-        print(f"机器人节点 {robot_id} 的准备消息已发送")
-        
-        # 所有机器人节点收到这条消息并更新状态
-        for rid in session["robot_nodes"]:
-            if rid != robot_id:
-                session["robot_node_states"][rid]["received_prepare_count"] += 1
+    if leader_sid:
+        count_message_sent(session_id, is_broadcast=False)
+        await sio.emit('message_received', vote_message, room=leader_sid)
+        print(f"机器人节点 {robot_id} 向 Leader {leader_id} 发送 VOTE(prepare)")
+    else:
+        print(f"Leader {leader_id} 不在线，缓存机器人投票")
     
-    # 检查准备阶段是否完成（每次添加消息后检查）
-    await check_prepare_phase(session_id)
-    
-    # 检查是否有机器人节点需要进入提交阶段
-    await check_robot_nodes_ready_for_commit(session_id)
+    await handle_vote(session_id, vote_message)
 
 async def check_robot_nodes_ready_for_commit(session_id: str):
-    """检查机器人节点是否准备好发送提交消息"""
-    session = get_session(session_id)
-    if not session:
-        return
-    
-    if session["phase"] != "commit":
-        return  # 还没进入提交阶段
-    
-    config = session["config"]
-    n = config["nodeCount"]
-    f = (n - 1) // 3
-    required_prepare = 2 * f  # 需要收到2f个准备消息
-    
-    # 检查每个机器人节点是否收到足够的准备消息
-    for robot_id in session["robot_nodes"]:
-        robot_state = session["robot_node_states"][robot_id]
-        
-        # 如果已经发送过提交消息，跳过
-        if robot_state["sent_commit"]:
-            continue
-        
-        # 检查是否收到足够的准备消息
-        if robot_state["received_prepare_count"] >= required_prepare:
-            print(f"机器人节点 {robot_id} 收到足够的准备消息，将在10秒后发送提交消息")
-            asyncio.create_task(schedule_robot_commit(session_id, robot_id, config["proposalValue"]))
-            robot_state["sent_commit"] = True  # 标记为已发送（虽然是异步的）
+    """HotStuff 中提交阶段由 Leader 收齐QC 后推进，这里仅保留占位"""
+    # 在 HotStuff 模式下，机器人投票由 Leader 汇总生成 QC 触发下一阶段
+    return
 
 async def schedule_robot_commit(session_id: str, robot_id: int, value: int):
     """调度机器人节点在10秒后发送提交消息"""
@@ -1277,37 +1430,38 @@ async def schedule_robot_commit(session_id: str, robot_id: int, value: int):
     await handle_robot_commit(session_id, robot_id, value)
 
 async def handle_robot_commit(session_id: str, robot_id: int, value: int):
-    """处理机器人节点的提交消息"""
+    """处理机器人节点的提交阶段投票（VOTE -> Leader 单播）"""
     session = get_session(session_id)
     if not session:
         return
     
-    message = {
+    leader_id = get_current_leader(session)
+    leader_sid = node_sockets.get(session_id, {}).get(leader_id)
+    
+    vote_message = {
         "from": robot_id,
-        "to": "all",
-        "type": "commit",
+        "to": leader_id,
+        "type": "vote",
         "value": value,
         "phase": "commit",
-        "round": session["current_round"],  # 添加轮次信息
+        "view": session["current_view"],
+        "round": session["current_round"],  # 兼容旧逻辑
+        "qc": None,
         "timestamp": datetime.now().isoformat(),
         "tampered": False,
         "isRobot": True
     }
     
-    session["messages"]["commit"].append(message)
+    session["messages"]["vote"].append(vote_message)
     
-    # 广播消息
-    if should_deliver_message(session_id):
-        await sio.emit('message_received', message, room=session_id)
-        print(f"机器人节点 {robot_id} 的提交消息已发送")
-        
-        # 所有机器人节点收到这条消息并更新状态
-        for rid in session["robot_nodes"]:
-            if rid != robot_id:
-                session["robot_node_states"][rid]["received_commit_count"] += 1
+    if leader_sid:
+        count_message_sent(session_id, is_broadcast=False)
+        await sio.emit('message_received', vote_message, room=leader_sid)
+        print(f"机器人节点 {robot_id} 向 Leader {leader_id} 发送 VOTE(commit)")
+    else:
+        print(f"Leader {leader_id} 不在线，缓存机器人投票")
     
-    # 检查提交阶段是否完成
-    await check_commit_phase(session_id)
+    await handle_vote(session_id, vote_message)
 
 if __name__ == "__main__":
     import uvicorn

@@ -13,7 +13,7 @@
 import { ref, computed, onMounted, watch } from "vue";
 
 export default {
-  props: ["topologyType", "nodeCount", "byzantineNodes", "simulationResult", "proposalValue"],
+  props: ["topologyType", "nodeCount", "byzantineNodes", "simulationResult", "proposalValue", "currentLeader"],
   setup(props) {
     const canvas = ref(null);
     const ctx = ref(null);
@@ -66,34 +66,25 @@ export default {
       ctx.value.stroke();
     };
 
-    // 绘制拓扑结构时直接使用缓存的节点位置和颜色，避免重复计算
+    // 绘制拓扑结构：HotStuff 使用星型拓扑，Leader 在中心，通过中心辐射连接所有节点
     const drawTopology = () => {
       if (!ctx.value) return;
       ctx.value.clearRect(0, 0, 600, 600);
       const positions = nodePositions.value;
+      const n = positions.length;
 
-      if (props.topologyType === "full") {
-        for (let i = 0; i < positions.length; i++) {
-          for (let j = i + 1; j < positions.length; j++) {
-            drawLine(positions[i], positions[j]);
-          }
-        }
-      } else if (props.topologyType === "ring") {
-        for (let i = 0; i < positions.length; i++) {
-          drawLine(positions[i], positions[(i + 1) % positions.length]);
-        }
-      } else if (props.topologyType === "star") {
-        for (let i = 1; i < positions.length; i++) {
-          drawLine(positions[0], positions[i]);
-        }
-      } else if (props.topologyType === "tree") {
-        for (let i = 0; i < positions.length; i++) {
-          const leftChild = 2 * i + 1;
-          const rightChild = 2 * i + 2;
-          if (leftChild < positions.length)
-            drawLine(positions[i], positions[leftChild]);
-          if (rightChild < positions.length)
-            drawLine(positions[i], positions[rightChild]);
+      if (n > 0) {
+        // 以 currentLeader 作为星型中心；如果未设置则默认 0
+        const leaderIndex =
+          typeof props.currentLeader === "number" &&
+          props.currentLeader >= 0 &&
+          props.currentLeader < n
+            ? props.currentLeader
+            : 0;
+
+        for (let i = 0; i < n; i++) {
+          if (i === leaderIndex) continue;
+          drawLine(positions[leaderIndex], positions[i]);
         }
       }
       drawNodes();
@@ -101,17 +92,64 @@ export default {
 
     // 单个阶段内所有消息动画同时播放的处理函数
     const animatePhase = (messages, doneCallback) => {
+      const leaderIndex =
+        typeof props.currentLeader === "number" &&
+        props.currentLeader >= 0 &&
+        props.currentLeader < props.nodeCount
+          ? props.currentLeader
+          : 0;
+
       const animations = messages
-        .filter((msg) => msg.dst !== null)
+        .filter((msg) => msg.dst !== null && msg.dst !== undefined)
         .map((msg) => {
+          let srcIndex = msg.src;
+          let dstIndex = msg.dst;
+
+          // Leader 广播场景：Proposal / QC 等消息由 Leader 发出到所有节点
+          const isLeaderBroadcast =
+            (msg.type === "pre_prepare" ||
+              msg.type === "qc" ||
+              msg.type === "proposal") &&
+            srcIndex === leaderIndex;
+
+          // 节点投票场景：节点向 Leader 发送 Vote
+          const isVote =
+            msg.type === "vote" ||
+            ((msg.type === "prepare" || msg.type === "commit") &&
+              dstIndex === leaderIndex &&
+              srcIndex !== leaderIndex);
+
+          if (isLeaderBroadcast) {
+            // 从 Leader 向四周扩散
+            srcIndex = leaderIndex;
+            dstIndex = msg.dst;
+          } else if (isVote) {
+            // 从节点向 Leader 汇聚
+            srcIndex = msg.src;
+            dstIndex = leaderIndex;
+          }
+
+          // 边界保护
+          if (
+            srcIndex == null ||
+            dstIndex == null ||
+            srcIndex < 0 ||
+            dstIndex < 0 ||
+            srcIndex >= nodePositions.value.length ||
+            dstIndex >= nodePositions.value.length
+          ) {
+            return null;
+          }
+
           return {
             msg,
-            start: nodePositions.value[msg.src],
-            end: nodePositions.value[msg.dst],
+            start: nodePositions.value[srcIndex],
+            end: nodePositions.value[dstIndex],
             frame: 0,
             steps: 100 // 动画步数设为 100，降低动画速度
           };
-        });
+        })
+        .filter((anim) => anim !== null);
 
       const animateStep = () => {
         ctx.value.clearRect(0, 0, 600, 600);

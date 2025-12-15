@@ -2,8 +2,8 @@
   <div class="home-page">
     <el-container>
       <el-header class="header">
-        <h1>分布式PBFT共识系统</h1>
-        <p>创建共识会话，让用户扮演节点参与共识过程</p>
+        <h1>分布式 HotStuff 共识系统</h1>
+        <p>创建 HotStuff 共识会话，让用户扮演节点参与共识过程</p>
       </el-header>
       
       <el-main class="main-content">
@@ -174,9 +174,9 @@
               
               <div class="welcome-content">
                 <el-icon size="60" color="#409EFF"><Connection /></el-icon>
-                <h2>分布式PBFT共识系统</h2>
-                <p>配置参数创建共识会话，生成二维码供其他用户扫描加入</p>
-                <p>每个用户将扮演一个节点，实时参与共识过程</p>
+                <h2>分布式 HotStuff 共识系统</h2>
+                <p>配置参数创建 HotStuff 共识会话，生成二维码供其他用户扫描加入</p>
+                <p>每个用户将扮演一个节点，实时参与 HotStuff 共识过程</p>
               </div>
             </el-card>
           </el-col>
@@ -187,7 +187,7 @@
     <!-- 动画演示对话框 -->
     <el-dialog
       v-model="demoDialogVisible"
-      title="PBFT共识过程动画演示"
+      title="HotStuff 共识过程动画演示"
       width="90%"
       :close-on-click-modal="false"
       destroy-on-close
@@ -240,10 +240,10 @@
           </div>
           
           <div class="table-section">
-            <h3>消息详情表</h3>
-            <PBFTTable
+            <h3>HotStuff 阶段消息表</h3>
+            <HotStuffTable
               v-if="currentSimulation"
-              :filteredSimulationResult="currentSimulation"
+              :simulationResult="currentSimulation"
               :nodeCount="formData.nodeCount"
             />
           </div>
@@ -264,14 +264,14 @@ import { VideoPlay } from '@element-plus/icons-vue'
 import QRCode from 'qrcode'
 import axios from 'axios'
 import Topology from '@/components/Topology.vue'
-import PBFTTable from '@/components/PBFTTable.vue'
+import HotStuffTable from '@/components/HotStuffTable.vue'
 
 export default {
   name: 'HomePage',
   components: {
     VideoPlay,
     Topology,
-    PBFTTable
+    HotStuffTable
   },
   setup() {
     const formRef = ref(null)

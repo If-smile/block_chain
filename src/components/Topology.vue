@@ -184,22 +184,46 @@ export default {
       animateStep();
     };
 
+    // 按序列播放多个阶段的动画（用于 HotStuff 多阶段展示）
+    const playSequence = (sequence, index) => {
+      if (!sequence || index >= sequence.length) {
+        // 所有阶段播放完成后，显示最终共识结果
+        const result = props.simulationResult;
+        finalConsensus.value =
+          result?.consensus || "共识结果已达成";
+        return;
+      }
+      // 播放当前阶段，完成后递归播放下一阶段
+      animatePhase(sequence[index] || [], () => {
+        playSequence(sequence, index + 1);
+      });
+    };
+
     const startAnimation = () => {
       const simulationResult = props.simulationResult;
       if (!simulationResult) return;
 
-      const prePrepareMessages = simulationResult.pre_prepare;
-      const prepareMessages = simulationResult.prepare.flat();
-      const commitMessages = simulationResult.commit.flat();
+      // 优先使用后端传来的精细动画序列（适配 HotStuff 多阶段）
+      if (
+        Array.isArray(simulationResult.animation_sequence) &&
+        simulationResult.animation_sequence.length > 0
+      ) {
+        playSequence(simulationResult.animation_sequence, 0);
+      } else {
+        // 兼容旧逻辑：三阶段 PBFT 风格动画
+        const prePrepareMessages = simulationResult.pre_prepare || [];
+        const prepareMessages = (simulationResult.prepare || []).flat();
+        const commitMessages = (simulationResult.commit || []).flat();
 
-      animatePhase(prePrepareMessages, () => {
-        animatePhase(prepareMessages, () => {
-          animatePhase(commitMessages, () => {
-            finalConsensus.value =
-              simulationResult.consensus || "共识结果已达成";
+        animatePhase(prePrepareMessages, () => {
+          animatePhase(prepareMessages, () => {
+            animatePhase(commitMessages, () => {
+              finalConsensus.value =
+                simulationResult.consensus || "共识结果已达成";
+            });
           });
         });
-      });
+      }
     };
 
     onMounted(() => {

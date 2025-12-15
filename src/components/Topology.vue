@@ -186,15 +186,24 @@ export default {
 
     // 按序列播放多个阶段的动画（用于 HotStuff 多阶段展示）
     const playSequence = (sequence, index) => {
+      // 播放结束
       if (!sequence || index >= sequence.length) {
-        // 所有阶段播放完成后，显示最终共识结果
         const result = props.simulationResult;
         finalConsensus.value =
           result?.consensus || "共识结果已达成";
         return;
       }
-      // 播放当前阶段，完成后递归播放下一阶段
-      animatePhase(sequence[index] || [], () => {
+
+      const currentStepMessages = sequence[index];
+
+      // 如果当前步骤没有消息，直接跳到下一步
+      if (!currentStepMessages || currentStepMessages.length === 0) {
+        playSequence(sequence, index + 1);
+        return;
+      }
+
+      // 播放当前这一步动画，播放完回调下一层
+      animatePhase(currentStepMessages, () => {
         playSequence(sequence, index + 1);
       });
     };
@@ -208,6 +217,12 @@ export default {
         Array.isArray(simulationResult.animation_sequence) &&
         simulationResult.animation_sequence.length > 0
       ) {
+        console.log(
+          "播放 HotStuff 序列动画, 步骤数:",
+          simulationResult.animation_sequence.length
+        );
+        // 清空旧的共识结果显示，避免与动画节奏冲突
+        finalConsensus.value = "";
         playSequence(simulationResult.animation_sequence, 0);
       } else {
         // 兼容旧逻辑：三阶段 PBFT 风格动画

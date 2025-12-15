@@ -929,9 +929,8 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
         "phase": phase,
         "view": view,
         "signers": list(voters),
-        "value": value
+        "value": value,
     }
-    session["messages"]["qc"].append(qc)
     
     next_phase = get_next_phase(phase)
     session["phase"] = next_phase
@@ -944,9 +943,13 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
         "phase": phase,
         "next_phase": next_phase,
         "view": view,
+        "round": session["current_round"],
         "qc": qc,
         "timestamp": datetime.now().isoformat()
     }
+    
+    # 将完整的 QC 广播消息写入会话历史，便于 get_session_history 做轮次与动画解析
+    session["messages"]["qc"].append(qc_message)
     
     # Leader 广播 QC 到所有节点
     count_message_sent(session_id, is_broadcast=True)

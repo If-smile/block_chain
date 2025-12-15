@@ -331,8 +331,8 @@ async def get_connected_nodes(session_id: str):
 
 @app.get("/api/sessions/{session_id}/history")
 async def get_session_history(session_id: str, round: Optional[int] = None):
-    """获取会话的真实消息历史，用于动画演示
-    
+    """获取会话的真实消息历史，用于动画演示（已适配 HotStuff）
+
     参数:
         round: 指定轮次，如果不指定则返回所有轮次信息
     """
@@ -353,9 +353,13 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     
     # 如果没有指定轮次，返回轮次列表和当前轮次
     if round is None:
-        # 获取所有轮次
+        # 获取所有轮次（从 pre_prepare / vote / qc 中提取 round 字段）
         all_rounds = set()
-        for msg_list in [messages.get("pre_prepare", []), messages.get("prepare", []), messages.get("commit", [])]:
+        for msg_list in [
+            messages.get("pre_prepare", []),
+            messages.get("vote", []),
+            messages.get("qc", []),
+        ]:
             for msg in msg_list:
                 if "round" in msg:
                     all_rounds.add(msg["round"])
@@ -371,23 +375,26 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
             "totalRounds": len(rounds_list)
         }
     
-    # 指定了轮次，返回该轮次的消息
+    # 指定了轮次，返回该轮次的消息（适配 HotStuff）
     print(f"获取第 {round} 轮消息")
     
     def filter_by_round(msg_list, target_round):
         """按轮次过滤消息"""
         return [msg for msg in msg_list if msg.get("round", 1) == target_round]
     
-    # 按轮次过滤消息
+    # 按轮次过滤 HotStuff 消息
     round_pre_prepare = filter_by_round(messages.get("pre_prepare", []), round)
-    round_prepare = filter_by_round(messages.get("prepare", []), round)
-    round_commit = filter_by_round(messages.get("commit", []), round)
+    round_votes = filter_by_round(messages.get("vote", []), round)
+    round_qc = filter_by_round(messages.get("qc", []), round)
     
-    print(f"第 {round} 轮消息数量: pre_prepare={len(round_pre_prepare)}, "
-          f"prepare={len(round_prepare)}, commit={len(round_commit)}")
+    print(
+        f"第 {round} 轮消息数量: pre_prepare={len(round_pre_prepare)}, "
+        f"vote={len(round_votes)}, qc={len(round_qc)}"
+    )
     
-    # 转换消息格式以适配动画组件
-    # Pre-prepare消息 - 展开广播为点对点消息
+    # =========================
+    # 1) Pre-Prepare 阶段 (Leader -> All)
+    # =========================
     pre_prepare_messages = []
     for msg in round_pre_prepare:
         src = msg["from"]
@@ -410,35 +417,41 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                 "type": "pre_prepare"
             })
     
-    # Prepare消息 - 展开广播为点对点消息
+    # =========================
+    # 2) Prepare 阶段 (Replicas -> Leader)：HotStuff 的 prepare 阶段投票
+    # =========================
     prepare_messages = []
-    for msg in round_prepare:
+    for msg in round_votes:
+        if msg.get("phase") != "prepare":
+            continue
         src = msg["from"]
+        dst = msg.get("to", None)
         value = msg.get("value", config["proposalValue"])
-        # 如果是广播消息，展开为多个点对点消息
-        if msg.get("to") == "all":
-            for dst in range(n):
-                if dst != src and is_connection_allowed(src, dst, n, topology, n_value):
-                    prepare_messages.append({
-                        "src": src,
-                        "dst": dst,
-                        "value": value,
-                        "type": "prepare"
-                    })
-        else:
-            prepare_messages.append({
-                "src": src,
-                "dst": msg.get("to", None),
-                "value": value,
-                "type": "prepare"
-            })
+        if dst is None:
+            continue
+        prepare_messages.append({
+            "src": src,
+            "dst": dst,
+            "value": value,
+            "type": "vote"  # 在前端通过 type + dst 是否为 Leader 来识别为投票
+        })
     
-    # Commit消息 - 展开广播为点对点消息
+    # =========================
+    # 3) Commit 阶段 (HotStuff 三步合并展示)
+    #    - phase == "prepare" 的 QC: Leader -> All (相当于 Pre-Commit 广播)
+    #    - phase == "commit"  的 vote: Replicas -> Leader
+    #    - phase == "commit"  的 QC: Leader -> All (Commit 广播)
+    #    - phase == "decide"  的 vote: Replicas -> Leader（如有）
+    # =========================
     commit_messages = []
-    for msg in round_commit:
-        src = msg["from"]
-        value = msg.get("value", config["proposalValue"])
-        # 如果是广播消息，展开为多个点对点消息
+    
+    # 3.1 Leader 广播 QC（phase == "prepare" 或 "commit"）: 展开为 Leader -> All
+    for msg in round_qc:
+        phase = msg.get("phase")
+        if phase not in ("prepare", "commit"):
+            continue
+        src = msg.get("from", 0)
+        value = msg.get("qc", {}).get("value", config["proposalValue"])
         if msg.get("to") == "all":
             for dst in range(n):
                 if dst != src and is_connection_allowed(src, dst, n, topology, n_value):
@@ -446,14 +459,46 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                         "src": src,
                         "dst": dst,
                         "value": value,
-                        "type": "commit"
+                        "type": "qc"  # Leader 广播 QC
                     })
         else:
+            dst = msg.get("to", None)
+            if dst is not None:
+                commit_messages.append({
+                    "src": src,
+                    "dst": dst,
+                    "value": value,
+                    "type": "qc"
+                })
+    
+    # 3.2 commit 阶段的投票 (Replicas -> Leader)
+    for msg in round_votes:
+        if msg.get("phase") == "commit":
+            src = msg["from"]
+            dst = msg.get("to", None)
+            value = msg.get("value", config["proposalValue"])
+            if dst is None:
+                continue
             commit_messages.append({
                 "src": src,
-                "dst": msg.get("to", None),
+                "dst": dst,
                 "value": value,
-                "type": "commit"
+                "type": "vote"
+            })
+    
+    # 3.3 decide 阶段的投票（如果存在）
+    for msg in round_votes:
+        if msg.get("phase") == "decide":
+            src = msg["from"]
+            dst = msg.get("to", None)
+            value = msg.get("value", config["proposalValue"])
+            if dst is None:
+                continue
+            commit_messages.append({
+                "src": src,
+                "dst": dst,
+                "value": value,
+                "type": "vote"
             })
     
     # 获取该轮的共识结果
@@ -1118,9 +1163,12 @@ async def start_next_round(session_id: str):
     if not session:
         return
     
-    # 增加轮次
+    # 增加轮次和视图（HotStuff视图轮换）
     session["current_round"] += 1
+    session["current_view"] += 1
     current_round = session["current_round"]
+    # 根据当前视图更新 Leader
+    session["leader_id"] = get_current_leader(session)
     
     # 重置会话状态
     session["status"] = "running"
@@ -1179,6 +1227,8 @@ async def start_next_round(session_id: str):
     # 通知所有节点（包括等待中的人类节点）进入新一轮共识
     await sio.emit('new_round', {
         "round": current_round,
+        "view": session["current_view"],
+        "leader": session["leader_id"],
         "phase": "pre-prepare",
         "step": 0
     }, room=session_id)
@@ -1280,7 +1330,7 @@ async def robot_send_pre_prepare(session_id: str):
     session["last_pre_prepare_round"] = current_round
     
     config = session["config"]
-    proposer_id = 0  # 提议者总是节点0
+    proposer_id = get_current_leader(session)  # 当前视图的Leader作为提议者
     
     # 只有当节点0是机器人节点时才自动发送
     if proposer_id not in session["robot_nodes"]:

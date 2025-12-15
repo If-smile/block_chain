@@ -843,6 +843,62 @@ async def send_message(sid, data):
             print(f"节点 {node_id} 的消息被丢弃 (传达概率: {session['config'].get('messageDeliveryRate', 100)}%)")
 
 
+async def trigger_robot_votes(session_id: str, view: int, phase: str, value: int):
+    """当进入新阶段时，触发机器人节点发送投票（HotStuff 多阶段自动推进）"""
+    print(f"触发机器人自动投票: session={session_id}, view={view}, phase={phase}")
+    # 模拟处理延迟，给前端一点时间展示 QC 广播动画
+    await asyncio.sleep(2.0)
+
+    session = get_session(session_id)
+    if not session:
+        return
+
+    # 如果视图已经变化，则不再对旧视图发送投票，避免乱序
+    if session.get("current_view") != view:
+        print(f"视图已从 {view} 切换为 {session.get('current_view')}，取消本次自动投票")
+        return
+
+    config = session["config"]
+    leader_id = get_current_leader(session)
+
+    # Decide 阶段不需要再投票，直接结束共识
+    if phase == "decide":
+        print(f"进入 Decide 阶段，直接完成共识: view={view}")
+        await finalize_consensus(session_id, "共识成功", f"View {view} 达成共识")
+        return
+
+    # 遍历机器人节点，向 Leader 发送下一阶段投票（pre-commit / commit）
+    for robot_id in session.get("robot_nodes", []):
+        if robot_id == leader_id:
+            # Leader 一般不再给自己单独发 vote 消息
+            continue
+
+        vote_msg: Dict[str, Any] = {
+            "from": robot_id,
+            "to": leader_id,
+            "type": "vote",
+            "value": value,
+            "phase": phase,              # 此处为新的阶段：pre-commit / commit
+            "view": view,
+            "round": session["current_round"],
+            "timestamp": datetime.now().isoformat(),
+            "tampered": False,
+            "isRobot": True
+        }
+
+        # 写入会话消息历史
+        session["messages"]["vote"].append(vote_msg)
+
+        # 发送给 Leader 对应的 socket，让前端能画出 All -> Leader 的投票动画
+        leader_sid = node_sockets.get(session_id, {}).get(leader_id)
+        if leader_sid:
+            count_message_sent(session_id, is_broadcast=False)
+            await sio.emit("message_received", vote_msg, room=leader_sid)
+
+        # 交给 HotStuff Leader 聚合逻辑处理
+        await handle_vote(session_id, vote_msg)
+
+
 async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
     """Leader 汇总 VOTE，达到阈值生成 QC 并广播下一阶段"""
     session = get_session(session_id)
@@ -905,6 +961,14 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
     print(f"Leader {leader_id} 收到 {len(voters)} 票，生成QC并进入 {next_phase}")
     
     pending[key] = voters
+
+    # HotStuff 多阶段自动推进：在进入下一阶段后，调度机器人自动投票
+    # next_phase 可能是 pre-commit / commit / decide
+    try:
+        asyncio.create_task(trigger_robot_votes(session_id, view, next_phase, value))
+    except RuntimeError as e:
+        # 在无事件循环环境下的防御性日志（理论上不会发生）
+        print(f"调度 trigger_robot_votes 失败: {e}")
 @sio.event
 async def choose_normal_consensus(sid, data):
     """处理人类节点选择正常共识"""

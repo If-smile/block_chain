@@ -235,7 +235,7 @@
               :byzantineNodes="formData.faultyNodes"
               :simulationResult="currentSimulation"
               :proposalValue="formData.proposalValue"
-              :currentLeader="currentLeader"
+              :currentLeader="demoLeader"
             />
           </div>
           
@@ -513,9 +513,15 @@ export default {
         // 2. 获取所有轮次的数据
         for (const roundNum of rounds) {
           const response = await axios.get(`/api/sessions/${sessionInfo.value.sessionId}/history?round=${roundNum}`)
+          const roundData = response.data || {}
+          // 确保每一轮的历史数据中包含 leaderId（后端已返回，如无则按公式回退）
+          const leaderId =
+            typeof roundData.leaderId === 'number'
+              ? roundData.leaderId
+              : ((roundNum - 1 + (roundData.nodeCount || formData.nodeCount)) % (roundData.nodeCount || formData.nodeCount))
           simulationRounds.value.push({
             id: roundNum,
-            data: response.data,
+            data: { ...roundData, leaderId },
             isReal: true
           })
         }
@@ -556,6 +562,14 @@ export default {
       }
     }
     
+    const demoLeader = computed(() => {
+      // 动画演示时优先使用当前轮次历史数据中的 leaderId，若无则退回当前会话的 Leader
+      if (currentSimulation.value && typeof currentSimulation.value.leaderId === 'number') {
+        return currentSimulation.value.leaderId
+      }
+      return currentLeader.value ?? 0
+    })
+
     const playAnimation = () => {
       if (topologyRef.value && topologyRef.value.startAnimation) {
         topologyRef.value.startAnimation()
@@ -583,7 +597,8 @@ export default {
       topologyRef,
       showDemo,
       onRoundChange,
-      playAnimation
+      playAnimation,
+      demoLeader
     }
   }
 }

@@ -511,8 +511,13 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     if not round_consensus:
         round_consensus = "共识进行中..." if round == session.get("current_round") else "无结果"
     
+    # 计算该轮次的 LeaderId
+    # round 从 1 开始，view 从 0 开始，因此 view = round - 1
+    leader_id = (round - 1) % config["nodeCount"]
+    
     return {
         "round": round,
+        "leaderId": leader_id,
         "pre_prepare": pre_prepare_messages,
         "prepare": [prepare_messages],
         "commit": [commit_messages],

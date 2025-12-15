@@ -393,7 +393,7 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     )
     
     # =========================
-    # 1) Pre-Prepare 阶段 (Leader -> All)
+    # 1) Pre-Prepare 阶段 (Leader -> All) -> 归入 HotStuff Prepare 列
     # =========================
     pre_prepare_messages = []
     for msg in round_pre_prepare:
@@ -407,14 +407,16 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                         "src": src,
                         "dst": dst,
                         "value": value,
-                        "type": "pre_prepare"
+                        "type": "pre_prepare",
+                        "phase": "prepare"
                     })
         else:
             pre_prepare_messages.append({
                 "src": src,
                 "dst": msg.get("to", None),
                 "value": value,
-                "type": "pre_prepare"
+                "type": "pre_prepare",
+                "phase": "prepare"
             })
     
     # =========================
@@ -433,7 +435,8 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
             "src": src,
             "dst": dst,
             "value": value,
-            "type": "vote"  # 在前端通过 type + dst 是否为 Leader 来识别为投票
+            "type": "vote",   # 在前端通过 type + dst 是否为 Leader 来识别为投票
+            "phase": "prepare"
         })
     
     # =========================
@@ -445,6 +448,15 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     for msg in round_qc:
         src = msg.get("from", 0)
         value = msg.get("qc", {}).get("value", config["proposalValue"])
+        phase = msg.get("phase")
+        # 根据 HotStuff 阶段将 QC 归入不同列
+        mapped_phase = "commit"
+        if phase == "prepare":
+            mapped_phase = "pre-commit"
+        elif phase == "pre-commit":
+            mapped_phase = "commit"
+        elif phase == "commit":
+            mapped_phase = "decide"
         if msg.get("to") == "all":
             for dst in range(n):
                 if dst != src and is_connection_allowed(src, dst, n, topology, n_value):
@@ -452,7 +464,8 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                         "src": src,
                         "dst": dst,
                         "value": value,
-                        "type": "qc"
+                        "type": "qc",
+                        "phase": mapped_phase
                     })
         else:
             dst = msg.get("to", None)
@@ -461,7 +474,8 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                     "src": src,
                     "dst": dst,
                     "value": value,
-                    "type": "qc"
+                    "type": "qc",
+                    "phase": mapped_phase
                 })
     
     for msg in round_votes:
@@ -469,12 +483,16 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
         dst = msg.get("to", None)
         value = msg.get("value", config["proposalValue"])
         if dst is None:
+        # 映射投票阶段：prepare -> prepare, pre-commit -> pre-commit, commit/decide -> commit/decide
             continue
+        phase = msg.get("phase")
+        mapped_phase = phase
         commit_messages.append({
             "src": src,
             "dst": dst,
             "value": value,
-            "type": "vote"
+            "type": "vote",
+            "phase": mapped_phase
         })
     
     # 获取该轮的共识结果
@@ -491,6 +509,7 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     animation_sequence: List[List[Dict[str, Any]]] = []
     
     # 1. Proposal (Leader -> All)
+    # （在 HotStuff 中归入 Prepare 阶段）
     animation_sequence.append(pre_prepare_messages)
     
     # 2. Prepare Vote (All -> Leader) - phase='prepare' 的 vote
@@ -501,7 +520,8 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                 "src": msg["from"],
                 "dst": msg["to"],
                 "value": msg.get("value", config["proposalValue"]),
-                "type": "vote"
+                "type": "vote",
+                "phase": "prepare"
             })
     animation_sequence.append(step2)
     
@@ -518,7 +538,8 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                             "src": src,
                             "dst": dst,
                             "value": value,
-                            "type": "qc"
+                            "type": "qc",
+                            "phase": "pre-commit"
                         })
     animation_sequence.append(step3)
     
@@ -530,7 +551,8 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                 "src": msg["from"],
                 "dst": msg["to"],
                 "value": msg.get("value", config["proposalValue"]),
-                "type": "vote"
+                "type": "vote",
+                "phase": "pre-commit"
             })
     animation_sequence.append(step4)
     
@@ -547,7 +569,8 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                             "src": src,
                             "dst": dst,
                             "value": value,
-                            "type": "qc"
+                            "type": "qc",
+                            "phase": "commit"
                         })
     animation_sequence.append(step5)
     
@@ -559,7 +582,8 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                 "src": msg["from"],
                 "dst": msg["to"],
                 "value": msg.get("value", config["proposalValue"]),
-                "type": "vote"
+                "type": "vote",
+                "phase": "commit"
             })
     animation_sequence.append(step6)
     
@@ -576,7 +600,8 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                             "src": src,
                             "dst": dst,
                             "value": value,
-                            "type": "qc"
+                            "type": "qc",
+                            "phase": "decide"
                         })
     animation_sequence.append(step7)
     

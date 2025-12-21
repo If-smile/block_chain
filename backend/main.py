@@ -329,6 +329,8 @@ async def get_connected_nodes(session_id: str):
         "totalNodes": session["config"]["nodeCount"]
     }
 
+@app.get("/api/sessions/{session_id}/history")
+async def get_session_history(session_id: str, round: Optional[int] = None):
     """获取会话的真实消息历史，适配 HotStuff 表格和动画"""
     session = get_session(session_id)
     if not session:
@@ -680,6 +682,7 @@ async def send_message(sid, data):
         "value": value,
         "phase": session.get("phase", "waiting"),
         "view": session.get("current_view", 0),  # HotStuff视图
+        "round": session.get("current_round", 1),  # 当前轮次（用于历史过滤）
         "qc": data.get("qc"),                    # Quorum Certificate
         "timestamp": datetime.now().isoformat(),
         "tampered": False
@@ -690,6 +693,9 @@ async def send_message(sid, data):
         session["messages"]["prepare"].append(message)
     elif message_type == "commit":
         session["messages"]["commit"].append(message)
+    elif message_type == "vote":
+        # HotStuff 投票消息存入 vote 列表
+        session["messages"]["vote"].append(message)
     else:
         # 其他类型消息
         if "other" not in session["messages"]:

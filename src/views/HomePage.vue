@@ -313,7 +313,7 @@ export default {
     
     const currentView = computed(() => sessionInfo.value?.currentView ?? 0)
     const currentLeader = computed(() => sessionInfo.value?.leaderId ?? 0)
-
+    
     const nodeLinks = computed(() => {
       if (!sessionInfo.value) return []
       
@@ -569,7 +569,7 @@ export default {
       }
       return currentLeader.value ?? 0
     })
-
+    
     const playAnimation = () => {
       if (topologyRef.value && topologyRef.value.startAnimation) {
         topologyRef.value.startAnimation()

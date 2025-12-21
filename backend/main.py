@@ -329,20 +329,9 @@ async def get_connected_nodes(session_id: str):
         "totalNodes": session["config"]["nodeCount"]
     }
 
-@app.get("/api/sessions/{session_id}/history")
-async def get_session_history(session_id: str, round: Optional[int] = None):
-    """获取会话的真实消息历史，用于动画演示（已适配 HotStuff）
-
-    参数:
-        round: 指定轮次，如果不指定则返回所有轮次信息
-    """
-    print(f"\n=== 获取会话历史 ===")
-    print(f"请求的会话ID: {session_id}, 轮次: {round if round else '所有'}")
-    print(f"当前所有会话ID: {list(sessions.keys())}")
-    
+    """获取会话的真实消息历史，适配 HotStuff 表格和动画"""
     session = get_session(session_id)
     if not session:
-        print(f"错误: 会话 {session_id} 不存在")
         raise HTTPException(status_code=404, detail="会话不存在")
     
     config = session["config"]
@@ -351,276 +340,160 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     topology = config["topology"]
     n_value = config.get("branchCount", 2)
     
-    # 如果没有指定轮次，返回轮次列表和当前轮次
+    # 1. 确定轮次范围
     if round is None:
-        # 获取所有轮次（从 pre_prepare / vote / qc 中提取 round 字段）
+        # 获取所有存在的轮次
         all_rounds = set()
-        for msg_list in [
-            messages.get("pre_prepare", []),
-            messages.get("vote", []),
-            messages.get("qc", []),
-        ]:
-            for msg in msg_list:
+        for key in ["pre_prepare", "vote", "qc"]:
+            for msg in messages.get(key, []):
                 if "round" in msg:
                     all_rounds.add(msg["round"])
-        
-        rounds_list = sorted(list(all_rounds))
+        target_rounds = sorted(list(all_rounds))
         current_round = session.get("current_round", 1)
-        
-        print(f"会话共有 {len(rounds_list)} 轮: {rounds_list}, 当前轮次: {current_round}")
-        
         return {
-            "rounds": rounds_list,
+            "rounds": target_rounds,
             "currentRound": current_round,
-            "totalRounds": len(rounds_list)
+            "totalRounds": len(target_rounds)
         }
+
+    # 2. 准备数据容器
+    table_messages: List[Dict[str, Any]] = []      # 表格用（合并广播，含phase）
+    animation_sequence: List[List[Dict[str, Any]]] = []  # 动画用（拆分广播，按步骤）
     
-    # 指定了轮次，返回该轮次的消息（适配 HotStuff）
-    print(f"获取第 {round} 轮消息")
-    
-    def filter_by_round(msg_list, target_round):
-        """按轮次过滤消息"""
-        return [msg for msg in msg_list if msg.get("round", 1) == target_round]
-    
-    # 按轮次过滤 HotStuff 消息
-    round_pre_prepare = filter_by_round(messages.get("pre_prepare", []), round)
-    round_votes = filter_by_round(messages.get("vote", []), round)
-    round_qc = filter_by_round(messages.get("qc", []), round)
-    
-    print(
-        f"第 {round} 轮消息数量: pre_prepare={len(round_pre_prepare)}, "
-        f"vote={len(round_votes)}, qc={len(round_qc)}"
-    )
-    
-    # =========================
-    # 1) Pre-Prepare 阶段 (Leader -> All) -> 归入 HotStuff Prepare 列
-    # =========================
-    pre_prepare_messages = []
+    # 辅助函数：按轮次过滤
+    def get_msgs(key, r):
+        return [m for m in messages.get(key, []) if m.get("round") == r]
+
+    round_pre_prepare = get_msgs("pre_prepare", round)
+    round_votes = get_msgs("vote", round)
+    round_qc = get_msgs("qc", round)
+
+    # === 构建 HotStuff 7步 流程 ===
+
+    # Step 1: Proposal (Leader -> All) [Phase: Prepare]
+    step1_anim: List[Dict[str, Any]] = []
     for msg in round_pre_prepare:
+        # 表格数据：保留广播，添加 phase
+        table_msg = msg.copy()
+        table_msg["phase"] = "prepare" 
+        table_msg["type"] = "proposal"
+        table_msg["dst"] = "All" if msg.get("to") == "all" else msg.get("to")
+        table_messages.append(table_msg)
+
+        # 动画数据：拆分广播
         src = msg["from"]
-        value = msg.get("value", config["proposalValue"])
-        # 如果是广播消息，展开为多个点对点消息
+        value = msg.get("value")
         if msg.get("to") == "all":
             for dst in range(n):
                 if dst != src and is_connection_allowed(src, dst, n, topology, n_value):
-                    pre_prepare_messages.append({
-                        "src": src,
-                        "dst": dst,
-                        "value": value,
-                        "type": "pre_prepare",
-                        "phase": "prepare"
-                    })
+                    step1_anim.append({"src": src, "dst": dst, "value": value, "type": "proposal"})
         else:
-            pre_prepare_messages.append({
-                "src": src,
-                "dst": msg.get("to", None),
-                "value": value,
-                "type": "pre_prepare",
-                "phase": "prepare"
-            })
-    
-    # =========================
-    # 2) Prepare 阶段 (Replicas -> Leader)：HotStuff 的 prepare 阶段投票
-    # =========================
-    prepare_messages = []
+            step1_anim.append({"src": src, "dst": msg.get("to"), "value": value, "type": "proposal"})
+    animation_sequence.append(step1_anim)
+
+    # Step 2: Prepare Vote (All -> Leader) [Phase: Prepare]
+    step2_msgs: List[Dict[str, Any]] = []
     for msg in round_votes:
-        if msg.get("phase") != "prepare":
-            continue
-        src = msg["from"]
-        dst = msg.get("to", None)
-        value = msg.get("value", config["proposalValue"])
-        if dst is None:
-            continue
-        prepare_messages.append({
-            "src": src,
-            "dst": dst,
-            "value": value,
-            "type": "vote",   # 在前端通过 type + dst 是否为 Leader 来识别为投票
-            "phase": "prepare"
-        })
-    
-    # =========================
-    # Commit 列（表格兼容用）：合并后续阶段的所有消息
-    # =========================
-    commit_messages = []
-    # 为了兼容旧表格，这里仍然将后续阶段的 QC / Vote 合并到 commit_messages 中
-    # phase = prepare / pre-commit / commit / decide 的 QC 和 Vote 都归入 commit 列
+        if msg.get("phase") == "prepare":
+            m = {"src": msg["from"], "dst": msg["to"], "value": msg.get("value"), "type": "vote", "phase": "prepare"}
+            step2_msgs.append(m)
+            table_messages.append(m)
+    animation_sequence.append(step2_msgs)
+
+    # Step 3: Pre-Commit QC (Leader -> All) [Phase: Pre-Commit]
+    step3_anim: List[Dict[str, Any]] = []
     for msg in round_qc:
-        src = msg.get("from", 0)
-        value = msg.get("qc", {}).get("value", config["proposalValue"])
-        phase = msg.get("phase")
-        # 根据 HotStuff 阶段将 QC 归入不同列
-        mapped_phase = "commit"
-        if phase == "prepare":
-            mapped_phase = "pre-commit"
-        elif phase == "pre-commit":
-            mapped_phase = "commit"
-        elif phase == "commit":
-            mapped_phase = "decide"
-        if msg.get("to") == "all":
-            for dst in range(n):
-                if dst != src and is_connection_allowed(src, dst, n, topology, n_value):
-                    commit_messages.append({
-                        "src": src,
-                        "dst": dst,
-                        "value": value,
-                        "type": "qc",
-                        "phase": mapped_phase
-                    })
-        else:
-            dst = msg.get("to", None)
-            if dst is not None:
-                commit_messages.append({
-                    "src": src,
-                    "dst": dst,
-                    "value": value,
-                    "type": "qc",
-                    "phase": mapped_phase
-                })
-    
+        if msg.get("phase") == "prepare":  # Prepare QC 开启 Pre-Commit 阶段
+            # 表格数据
+            table_msg = msg.copy()
+            table_msg["phase"] = "pre-commit"
+            table_msg["type"] = "qc"
+            table_msg["dst"] = "All" if msg.get("to") == "all" else msg.get("to")
+            table_messages.append(table_msg)
+            
+            # 动画数据
+            src = msg["from"]
+            value = msg.get("qc", {}).get("value")
+            if msg.get("to") == "all":
+                for dst in range(n):
+                    if dst != src and is_connection_allowed(src, dst, n, topology, n_value):
+                        step3_anim.append({"src": src, "dst": dst, "value": value, "type": "qc"})
+    animation_sequence.append(step3_anim)
+
+    # Step 4: Pre-Commit Vote (All -> Leader) [Phase: Pre-Commit]
+    step4_msgs: List[Dict[str, Any]] = []
     for msg in round_votes:
-        src = msg["from"]
-        dst = msg.get("to", None)
-        value = msg.get("value", config["proposalValue"])
-        if dst is None:
-        # 映射投票阶段：prepare -> prepare, pre-commit -> pre-commit, commit/decide -> commit/decide
-            continue
-        phase = msg.get("phase")
-        mapped_phase = phase
-        commit_messages.append({
-            "src": src,
-            "dst": dst,
-            "value": value,
-            "type": "vote",
-            "phase": mapped_phase
-        })
-    
-    # 获取该轮的共识结果
-    round_consensus = None
+        if msg.get("phase") == "pre-commit": 
+            m = {"src": msg["from"], "dst": msg["to"], "value": msg.get("value"), "type": "vote", "phase": "pre-commit"}
+            step4_msgs.append(m)
+            table_messages.append(m)
+    animation_sequence.append(step4_msgs)
+
+    # Step 5: Commit QC (Leader -> All) [Phase: Commit]
+    step5_anim: List[Dict[str, Any]] = []
+    for msg in round_qc:
+        if msg.get("phase") == "pre-commit":  # Pre-Commit QC 开启 Commit 阶段
+            # 表格数据
+            table_msg = msg.copy()
+            table_msg["phase"] = "commit"
+            table_msg["type"] = "qc"
+            table_msg["dst"] = "All" if msg.get("to") == "all" else msg.get("to")
+            table_messages.append(table_msg)
+
+            # 动画数据
+            src = msg["from"]
+            value = msg.get("qc", {}).get("value")
+            if msg.get("to") == "all":
+                for dst in range(n):
+                    if dst != src and is_connection_allowed(src, dst, n, topology, n_value):
+                        step5_anim.append({"src": src, "dst": dst, "value": value, "type": "qc"})
+    animation_sequence.append(step5_anim)
+
+    # Step 6: Commit Vote (All -> Leader) [Phase: Commit]
+    step6_msgs: List[Dict[str, Any]] = []
+    for msg in round_votes:
+        if msg.get("phase") == "commit":
+            m = {"src": msg["from"], "dst": msg["to"], "value": msg.get("value"), "type": "vote", "phase": "commit"}
+            step6_msgs.append(m)
+            table_messages.append(m)
+    animation_sequence.append(step6_msgs)
+
+    # Step 7: Decide QC (Leader -> All) [Phase: Decide]
+    step7_anim: List[Dict[str, Any]] = []
+    for msg in round_qc:
+        if msg.get("phase") == "commit":  # Commit QC 开启 Decide 阶段
+            # 表格数据
+            table_msg = msg.copy()
+            table_msg["phase"] = "decide"
+            table_msg["type"] = "qc"
+            table_msg["dst"] = "All" if msg.get("to") == "all" else msg.get("to")
+            table_messages.append(table_msg)
+
+            # 动画数据
+            src = msg["from"]
+            value = msg.get("qc", {}).get("value")
+            if msg.get("to") == "all":
+                for dst in range(n):
+                    if dst != src and is_connection_allowed(src, dst, n, topology, n_value):
+                        step7_anim.append({"src": src, "dst": dst, "value": value, "type": "qc"})
+    animation_sequence.append(step7_anim)
+
+    # 获取共识结果文本
+    round_consensus = "共识进行中..."
     for history in session.get("consensus_history", []):
         if history.get("round") == round:
             round_consensus = f"{history.get('status', '未知')}: {history.get('description', '')}"
             break
-    
-    if not round_consensus:
-        round_consensus = "共识进行中..." if round == session.get("current_round") else "无结果"
-    
-    # 构建精细的动画序列 (HotStuff 7-step interaction)
-    animation_sequence: List[List[Dict[str, Any]]] = []
-    
-    # 1. Proposal (Leader -> All)
-    # （在 HotStuff 中归入 Prepare 阶段）
-    animation_sequence.append(pre_prepare_messages)
-    
-    # 2. Prepare Vote (All -> Leader) - phase='prepare' 的 vote
-    step2: List[Dict[str, Any]] = []
-    for msg in round_votes:
-        if msg.get("phase") == "prepare" and msg.get("to") is not None:
-            step2.append({
-                "src": msg["from"],
-                "dst": msg["to"],
-                "value": msg.get("value", config["proposalValue"]),
-                "type": "vote",
-                "phase": "prepare"
-            })
-    animation_sequence.append(step2)
-    
-    # 3. Pre-Commit QC (Leader -> All) - phase='prepare' 的 QC
-    step3: List[Dict[str, Any]] = []
-    for msg in round_qc:
-        if msg.get("phase") == "prepare":
-            src = msg.get("from", 0)
-            value = msg.get("qc", {}).get("value", config["proposalValue"])
-            if msg.get("to") == "all":
-                for dst in range(n):
-                    if dst != src and is_connection_allowed(src, dst, n, topology, n_value):
-                        step3.append({
-                            "src": src,
-                            "dst": dst,
-                            "value": value,
-                            "type": "qc",
-                            "phase": "pre-commit"
-                        })
-    animation_sequence.append(step3)
-    
-    # 4. Pre-Commit Vote (All -> Leader) - phase='pre-commit' 的 vote
-    step4: List[Dict[str, Any]] = []
-    for msg in round_votes:
-        if msg.get("phase") == "pre-commit" and msg.get("to") is not None:
-            step4.append({
-                "src": msg["from"],
-                "dst": msg["to"],
-                "value": msg.get("value", config["proposalValue"]),
-                "type": "vote",
-                "phase": "pre-commit"
-            })
-    animation_sequence.append(step4)
-    
-    # 5. Commit QC (Leader -> All) - phase='pre-commit' 的 QC
-    step5: List[Dict[str, Any]] = []
-    for msg in round_qc:
-        if msg.get("phase") == "pre-commit":
-            src = msg.get("from", 0)
-            value = msg.get("qc", {}).get("value", config["proposalValue"])
-            if msg.get("to") == "all":
-                for dst in range(n):
-                    if dst != src and is_connection_allowed(src, dst, n, topology, n_value):
-                        step5.append({
-                            "src": src,
-                            "dst": dst,
-                            "value": value,
-                            "type": "qc",
-                            "phase": "commit"
-                        })
-    animation_sequence.append(step5)
-    
-    # 6. Commit Vote (All -> Leader) - phase='commit' 的 vote
-    step6: List[Dict[str, Any]] = []
-    for msg in round_votes:
-        if msg.get("phase") == "commit" and msg.get("to") is not None:
-            step6.append({
-                "src": msg["from"],
-                "dst": msg["to"],
-                "value": msg.get("value", config["proposalValue"]),
-                "type": "vote",
-                "phase": "commit"
-            })
-    animation_sequence.append(step6)
-    
-    # 7. Decide QC (Leader -> All) - phase='commit' 的 QC
-    step7: List[Dict[str, Any]] = []
-    for msg in round_qc:
-        if msg.get("phase") == "commit":
-            src = msg.get("from", 0)
-            value = msg.get("qc", {}).get("value", config["proposalValue"])
-            if msg.get("to") == "all":
-                for dst in range(n):
-                    if dst != src and is_connection_allowed(src, dst, n, topology, n_value):
-                        step7.append({
-                            "src": src,
-                            "dst": dst,
-                            "value": value,
-                            "type": "qc",
-                            "phase": "decide"
-                        })
-    animation_sequence.append(step7)
-    
-    # 计算该轮次的 LeaderId
-    # round 从 1 开始，view 从 0 开始，因此 view = round - 1
-    leader_id = (round - 1) % config["nodeCount"]
-    
+
     return {
         "round": round,
-        "leaderId": leader_id,
-        "pre_prepare": pre_prepare_messages,
-        "prepare": [prepare_messages],
-        "commit": [commit_messages],
+        "leaderId": (round - 1) % config["nodeCount"],
+        "messages": table_messages,               # 表格数据（含phase，未拆分广播）
+        "animation_sequence": animation_sequence, # 动画数据（7步序列，拆分广播）
         "consensus": round_consensus,
-        "messages": pre_prepare_messages + prepare_messages + commit_messages,
         "nodeCount": config["nodeCount"],
         "topology": config["topology"],
-        "proposalValue": config["proposalValue"],
-        "animation_sequence": animation_sequence
+        "proposalValue": config["proposalValue"]
     }
 
 # Socket.IO事件处理
@@ -841,7 +714,7 @@ async def send_message(sid, data):
             print(f"节点 {node_id} 的消息已发送 (传达概率: {session['config'].get('messageDeliveryRate', 100)}%)")
         else:
             print(f"节点 {node_id} 的消息被丢弃 (传达概率: {session['config'].get('messageDeliveryRate', 100)}%)")
-
+    
 
 async def trigger_robot_votes(session_id: str, view: int, phase: str, value: int):
     """当进入新阶段时，触发机器人节点发送投票（HotStuff 多阶段自动推进）"""

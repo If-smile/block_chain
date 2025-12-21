@@ -230,14 +230,14 @@ export default {
         const prepareMessages = (simulationResult.prepare || []).flat();
         const commitMessages = (simulationResult.commit || []).flat();
 
-        animatePhase(prePrepareMessages, () => {
-          animatePhase(prepareMessages, () => {
-            animatePhase(commitMessages, () => {
-              finalConsensus.value =
-                simulationResult.consensus || "共识结果已达成";
-            });
+      animatePhase(prePrepareMessages, () => {
+        animatePhase(prepareMessages, () => {
+          animatePhase(commitMessages, () => {
+            finalConsensus.value =
+              simulationResult.consensus || "共识结果已达成";
           });
         });
+      });
       }
     };
 

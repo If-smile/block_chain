@@ -92,7 +92,7 @@ def create_session(config: SessionConfig) -> SessionInfo:
         "node_states": {},  # 每个节点的持久化状态 {node_id: {lockedQC, prepareQC, currentView}}
         "pending_votes": {},  # {(view, phase, value): set(voter_ids)}
         "pending_new_views": {},  # {(view): {node_id: new_view_msg}} Leader 收集的 NEW-VIEW 消息
-        "message_buffer": {},  # {node_id: {view: [messages]}} 未来视图的消息缓冲池
+        "message_buffer": {},  # {view: [messages]} 未来视图的消息缓冲池（扁平结构）
         "network_stats": {    # 通信复杂度统计
             "total_messages_sent": 0,  # 本轮产生的总网络包数量
             "phases_count": 0          # 经历的阶段数（HotStuff阶段流转次数）
@@ -967,7 +967,8 @@ async def handle_proposal_message(session_id: str, proposal_msg: Dict[str, Any],
     # 通过 SafeNode 检查，节点发送 Prepare Vote
     print(f"节点 {node_id}: SafeNode 检查通过，发送 Vote（View {proposal_view}, Value {proposal_value}）")
     
-    # 发送 Prepare Vote（仅对机器人节点，人类节点通过 WebSocket 事件发送）
+    # 完善封装逻辑：SafeNode 检查通过后，触发投票动作
+    # 仅对机器人节点自动发送投票，人类节点通过 WebSocket 事件由前端发送
     if node_id in session.get("robot_nodes", []):
         await handle_robot_prepare(session_id, node_id, proposal_value)
         return True
@@ -1031,11 +1032,9 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
     if view > current_view:
         print(f"投票视图 {view} > 当前视图 {current_view}，缓冲消息")
         buffer = session.setdefault("message_buffer", {})
-        if voter not in buffer:
-            buffer[voter] = {}
-        if view not in buffer[voter]:
-            buffer[voter][view] = []
-        buffer[voter][view].append({"type": "vote", "msg": vote_message})
+        if view not in buffer:
+            buffer[view] = []
+        buffer[view].append(vote_message)
         return
     
     # 如果投票的 view 小于当前 view，忽略旧消息
@@ -1597,7 +1596,14 @@ async def trigger_view_change(session_id: str, old_view: int):
     
     # 处理消息缓冲池：取出当前新 View 的消息并重新处理（消息缓冲机制）
     # 注意：在视图切换完成后处理缓冲消息，确保消息在正确的视图上下文中处理
-    await process_message_buffer(session_id, new_view)
+    buffer = session.get("message_buffer", {})
+    if new_view in buffer:
+        buffered_votes = buffer[new_view]
+        print(f"View {new_view} 缓冲中有 {len(buffered_votes)} 条投票消息，开始重新处理")
+        for vote_msg in buffered_votes:
+            await handle_vote(session_id, vote_msg)
+        # 清除已处理的消息
+        del buffer[new_view]
 
 async def start_next_round(session_id: str):
     """启动下一轮共识"""
@@ -1929,10 +1935,9 @@ async def robot_send_prepare_messages(session_id: str):
         if session["robot_node_states"][robot_id].get("sent_prepare"):
             continue  # 已经发送过了
         
-        # 复用 handle_proposal_message 进行 SafeNode 检查并发送投票
-        success = await handle_proposal_message(session_id, proposal_msg, robot_id)
-        if success:
-            session["robot_node_states"][robot_id]["sent_prepare"] = True
+        # 直接调用 handle_proposal_message 进行处理（激活死代码，复用逻辑）
+        await handle_proposal_message(session_id, proposal_msg, robot_id)
+        session["robot_node_states"][robot_id]["sent_prepare"] = True
 
 async def handle_robot_prepare(session_id: str, robot_id: int, value: int):
     """

@@ -73,8 +73,7 @@ def create_session(config: SessionConfig) -> SessionInfo:
         "status": "waiting",
         "phase": "waiting",
         "phase_step": 0,
-        "current_round": 1,  # 当前共识轮次（保留用于兼容旧逻辑）
-        "current_view": 0,   # 当前视图编号（HotStuff）
+        "current_view": 0,   # 当前视图编号（HotStuff，View 即时钟）
         "leader_id": 0,      # 当前视图的Leader ID
         "connected_nodes": [],
         "robot_nodes": [],  # 机器人节点列表
@@ -86,10 +85,13 @@ def create_session(config: SessionConfig) -> SessionInfo:
             "prepare": [],
             "commit": [],
             "vote": [],
-            "qc": []
+            "qc": [],
+            "new_view": []  # NEW-VIEW 消息
         },
-        "node_states": {},
-        "pending_votes": {},  # {(view, phase): set(voter_ids)}
+        "node_states": {},  # 每个节点的持久化状态 {node_id: {lockedQC, prepareQC, currentView}}
+        "pending_votes": {},  # {(view, phase, value): set(voter_ids)}
+        "pending_new_views": {},  # {(view): {node_id: new_view_msg}} Leader 收集的 NEW-VIEW 消息
+        "message_buffer": {},  # {node_id: {view: [messages]}} 未来视图的消息缓冲池
         "network_stats": {    # 通信复杂度统计
             "total_messages_sent": 0,  # 本轮产生的总网络包数量
             "phases_count": 0          # 经历的阶段数（HotStuff阶段流转次数）
@@ -98,6 +100,16 @@ def create_session(config: SessionConfig) -> SessionInfo:
         "consensus_history": [],  # 共识历史记录
         "created_at": datetime.now().isoformat()
     }
+    
+    # 初始化每个节点的持久化状态（HotStuff Safety 要求）
+    n = config.nodeCount
+    for node_id in range(n):
+        session["node_states"][node_id] = {
+            "lockedQC": None,      # 最高锁定的 QC (用于 SafeNode 检查)
+            "prepareQC": None,     # 最高准备的 QC (用于 New-View 选择 HighQC)
+            "currentView": 0,      # 节点当前视图（用于消息验证）
+            "highQC": None         # 用于 New-View 的最高 QC
+        }
     session["leader_id"] = session["current_view"] % config.nodeCount
     
     sessions[session_id] = session
@@ -128,9 +140,12 @@ def create_session(config: SessionConfig) -> SessionInfo:
 def get_session(session_id: str) -> Optional[Dict[str, Any]]:
     return sessions.get(session_id)
 
-def get_current_leader(session: Dict[str, Any]) -> int:
-    """返回当前视图的Leader"""
-    return session["current_view"] % session["config"]["nodeCount"]
+def get_current_leader(session: Dict[str, Any], view: Optional[int] = None) -> int:
+    """返回指定视图的Leader（HotStuff Leader Rotation: view % n）"""
+    if view is None:
+        view = session["current_view"]
+    n = session["config"]["nodeCount"]
+    return view % n
 
 def get_quorum_threshold(session: Dict[str, Any]) -> int:
     """HotStuff 需要 2f+1 票"""
@@ -149,16 +164,135 @@ def get_next_phase(phase: str) -> str:
     }
     return mapping.get(phase, "prepare")
 
+def qc_extends(qc1: Optional[Dict], qc2: Optional[Dict]) -> bool:
+    """检查 qc1 是否扩展自 qc2（HotStuff 的 Safety 条件：extends 关系）"""
+    if qc2 is None:
+        return True  # 如果 lockedQC 为空，任何 QC 都满足条件
+    if qc1 is None:
+        return False
+    
+    # 简化实现：检查 view 和 value 的继承关系
+    # 在实际 HotStuff 中，这需要检查区块链的父节点关系
+    # 这里我们简化为：如果 qc1.view > qc2.view 且 value 相同，则视为扩展
+    view1 = qc1.get("view", -1)
+    view2 = qc2.get("view", -1)
+    value1 = qc1.get("value")
+    value2 = qc2.get("value")
+    
+    # 如果 qc1 的 view 更高且 value 相同，则视为扩展关系
+    return view1 > view2 and value1 == value2
+
+def check_safe_node(session: Dict[str, Any], node_id: int, proposal_view: int, proposal_value: int, proposal_qc: Optional[Dict]) -> bool:
+    """
+    HotStuff SafeNode 谓词检查（Safety 的核心机制）
+    
+    条件：msg.view > lockedQC.view OR msg.extends(lockedQC)
+    
+    参数:
+        session: 会话数据
+        node_id: 节点ID
+        proposal_view: 提案的视图号
+        proposal_value: 提案的值
+        proposal_qc: 提案携带的 QC（可选）
+    
+    返回:
+        bool: 如果通过 SafeNode 检查返回 True，否则返回 False
+    """
+    node_state = session["node_states"].get(node_id, {})
+    lockedQC = node_state.get("lockedQC")
+    
+    # 条件1: proposal_view > lockedQC.view (Liveness/Freshness)
+    if lockedQC is None:
+        # 如果没有锁定QC，允许投票（首次提案）
+        print(f"节点 {node_id}: SafeNode 检查通过（无 lockedQC）")
+        return True
+    
+    locked_view = lockedQC.get("view", -1)
+    if proposal_view > locked_view:
+        print(f"节点 {node_id}: SafeNode 检查通过（proposal_view {proposal_view} > lockedQC.view {locked_view}）")
+        return True
+    
+    # 条件2: proposal.extends(lockedQC) (Safety)
+    if proposal_qc:
+        if qc_extends(proposal_qc, lockedQC):
+            print(f"节点 {node_id}: SafeNode 检查通过（proposal QC 扩展自 lockedQC）")
+            return True
+        else:
+            print(f"节点 {node_id}: SafeNode 检查失败（proposal QC 不扩展自 lockedQC）")
+            return False
+    
+    # 如果 proposal_qc 为空但 proposal_value 与 lockedQC.value 相同，也视为扩展
+    locked_value = lockedQC.get("value")
+    if proposal_value == locked_value and proposal_view >= locked_view:
+        print(f"节点 {node_id}: SafeNode 检查通过（proposal value 与 lockedQC value 相同）")
+        return True
+    
+    # 不满足任何条件，拒绝提案
+    print(f"节点 {node_id}: SafeNode 检查失败（proposal_view {proposal_view} <= lockedQC.view {locked_view} 且不扩展）")
+    return False
+
+def update_node_locked_qc(session: Dict[str, Any], node_id: int, qc: Dict):
+    """
+    更新节点的 lockedQC（在收到 CommitQC 时调用）
+    
+    参数:
+        session: 会话数据
+        node_id: 节点ID
+        qc: 新的 QC（必须是 Commit 阶段的 QC）
+    """
+    node_state = session["node_states"].get(node_id, {})
+    current_locked = node_state.get("lockedQC")
+    
+    qc_view = qc.get("view", -1)
+    if current_locked is None or qc_view > current_locked.get("view", -1):
+        node_state["lockedQC"] = qc.copy()
+        print(f"节点 {node_id}: 更新 lockedQC 到 view {qc_view}")
+    else:
+        print(f"节点 {node_id}: 忽略旧的 QC（view {qc_view} <= current lockedQC.view {current_locked.get('view', -1)}）")
+
+def update_node_prepare_qc(session: Dict[str, Any], node_id: int, qc: Dict):
+    """
+    更新节点的 prepareQC（在收到任何阶段的 QC 时调用，用于 New-View 选择 HighQC）
+    
+    参数:
+        session: 会话数据
+        node_id: 节点ID
+        qc: 新的 QC
+    """
+    node_state = session["node_states"].get(node_id, {})
+    current_prepare = node_state.get("prepareQC")
+    
+    qc_view = qc.get("view", -1)
+    if current_prepare is None or qc_view > current_prepare.get("view", -1):
+        node_state["prepareQC"] = qc.copy()
+        node_state["highQC"] = qc.copy()  # HighQC 就是最高的 prepareQC
+        print(f"节点 {node_id}: 更新 prepareQC/highQC 到 view {qc_view}")
+
 def is_connection_allowed(i: int, j: int, n: int, topology: str, n_value: int) -> bool:
-    """检查两个节点之间是否允许连接"""
+    """
+    检查两个节点之间是否允许连接（仅用于历史记录展示，不影响实际共识逻辑）
+    
+    注意：HotStuff 协议要求星型拓扑（Leader <-> All Replicas）
+    实际的共识逻辑中，所有通信都是星型的（通过 get_current_leader 强制）
+    此函数仅用于前端历史记录的拓扑可视化
+    """
     if i == j:
         return False
+    
+    # HotStuff 强制星型拓扑：Leader 可以与所有节点通信，非 Leader 只能与 Leader 通信
+    # 为了兼容前端，这里仍然检查配置的 topology，但实际逻辑中已强制星型
+    # 如果配置不是 star，在历史记录中也会按 star 方式显示（Leader <-> All）
+    leader_id = get_current_leader({"config": {"nodeCount": n}, "current_view": 0}, 0)  # 假设 view=0，仅用于判断
+    # 在实际使用中，应该根据消息的 view 来确定 leader
+    # 这里简化处理，只检查是否是 Leader 与其他节点的连接
+    if topology == "star" or True:  # 强制星型（HotStuff 要求）
+        return True  # 在星型拓扑中，所有节点都可以与 Leader 通信（展示用）
+    
+    # 以下代码仅作为参考，实际不会被使用（因为上面已经 return True）
     if topology == "full":
         return True
     elif topology == "ring":
         return j == (i + 1) % n or j == (i - 1) % n
-    elif topology == "star":
-        return i == 0 or j == 0
     elif topology == "tree":
         parent = (j - 1) // n_value
         return i == parent and j < n
@@ -598,7 +732,7 @@ async def send_prepare(sid, data):
         "value": value,
         "phase": "prepare",
         "view": session["current_view"],
-        "round": session["current_round"],  # 兼容旧逻辑
+        "round": session["current_view"],  # 兼容前端：round 与 view 相同（HotStuff 不使用 round）
         "qc": data.get("qc"),
         "timestamp": datetime.now().isoformat(),
         "tampered": False,
@@ -640,7 +774,7 @@ async def send_commit(sid, data):
         "value": value,
         "phase": "commit",
         "view": session["current_view"],
-        "round": session["current_round"],  # 兼容旧逻辑
+        "round": session["current_view"],  # 兼容前端：round 与 view 相同（HotStuff 不使用 round）
         "qc": data.get("qc"),
         "timestamp": datetime.now().isoformat(),
         "tampered": False,
@@ -759,7 +893,7 @@ async def trigger_robot_votes(session_id: str, view: int, phase: str, value: int
             "value": value,
             "phase": phase,              # 此处为新的阶段：pre-commit / commit
             "view": view,
-            "round": session["current_round"],
+            "round": view,  # 兼容前端：round 与 view 相同（HotStuff 不使用 round）
             "timestamp": datetime.now().isoformat(),
             "tampered": False,
             "isRobot": True
@@ -778,8 +912,78 @@ async def trigger_robot_votes(session_id: str, view: int, phase: str, value: int
         await handle_vote(session_id, vote_msg)
 
 
+async def handle_proposal_message(session_id: str, proposal_msg: Dict[str, Any], node_id: int) -> bool:
+    """
+    处理 Replica 节点收到的 Proposal 消息（HotStuff PRE-PREPARE）
+    
+    必须通过 SafeNode 谓词检查才能发送 Vote
+    
+    参数:
+        session_id: 会话ID
+        proposal_msg: Proposal 消息
+        node_id: 接收消息的节点ID
+    
+    返回:
+        bool: 如果通过 SafeNode 检查并发送了 Vote 返回 True，否则返回 False
+    """
+    session = get_session(session_id)
+    if not session:
+        return False
+    
+    proposal_view = proposal_msg.get("view", -1)
+    proposal_value = proposal_msg.get("value")
+    proposal_qc = proposal_msg.get("qc")
+    proposer_id = proposal_msg.get("from")
+    
+    # 验证消息来自当前视图的 Leader（HotStuff 星型拓扑要求）
+    leader_id = get_current_leader(session, proposal_view)
+    if proposer_id != leader_id:
+        print(f"节点 {node_id}: 拒绝 Proposal（来自非 Leader {proposer_id}，当前 Leader 是 {leader_id}）")
+        return False
+    
+    # HotStuff SafeNode 谓词检查（Safety 的核心机制）
+    if not check_safe_node(session, node_id, proposal_view, proposal_value, proposal_qc):
+        print(f"节点 {node_id}: SafeNode 检查失败，拒绝 Proposal（View {proposal_view}）")
+        return False
+    
+    # 通过 SafeNode 检查，节点可以发送 Vote
+    print(f"节点 {node_id}: SafeNode 检查通过，将发送 Vote（View {proposal_view}, Value {proposal_value}）")
+    return True
+
+async def handle_qc_message(session_id: str, qc_msg: Dict[str, Any], node_id: int):
+    """
+    处理节点收到的 QC 消息（HotStuff 阶段推进）
+    
+    当收到 Commit 阶段的 QC 时，更新节点的 lockedQC
+    收到任何阶段的 QC 时，更新节点的 prepareQC（用于 New-View）
+    
+    参数:
+        session_id: 会话ID
+        qc_msg: QC 消息
+        node_id: 接收消息的节点ID
+    """
+    session = get_session(session_id)
+    if not session:
+        return
+    
+    qc = qc_msg.get("qc", {})
+    qc_phase = qc.get("phase", "")
+    qc_view = qc.get("view", -1)
+    
+    # 更新 prepareQC（用于 New-View 选择 HighQC）
+    update_node_prepare_qc(session, node_id, qc)
+    
+    # 如果收到 Commit 阶段的 QC，更新 lockedQC（HotStuff Safety 要求）
+    if qc_phase == "commit":
+        update_node_locked_qc(session, node_id, qc)
+        print(f"节点 {node_id}: 收到 Commit QC（View {qc_view}），已更新 lockedQC")
+
 async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
-    """Leader 汇总 VOTE，达到阈值生成 QC 并广播下一阶段"""
+    """
+    Leader 汇总 VOTE，达到阈值生成 QC 并广播下一阶段（HotStuff 阶段推进）
+    
+    生成 QC 后，所有节点会收到 QC 并更新其 prepareQC/lockedQC 状态
+    """
     session = get_session(session_id)
     if not session:
         return
@@ -789,9 +993,14 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
     voter = vote_message.get("from")
     value = vote_message.get("value")
     
-    leader_id = get_current_leader(session)
+    leader_id = get_current_leader(session, view)
     if vote_message.get("to") != leader_id:
         print(f"投票目标不是当前Leader，忽略: {vote_message}")
+        return
+    
+    # 检查投票的视图是否匹配
+    if view != session["current_view"]:
+        print(f"投票视图 {view} 不匹配当前视图 {session['current_view']}，忽略")
         return
     
     key = (view, phase, value)
@@ -804,6 +1013,7 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
         print(f"投票累积中: phase={phase}, view={view}, 收到 {len(voters)}/{threshold}")
         return
     
+    # 达到阈值，生成 QC
     qc = {
         "phase": phase,
         "view": view,
@@ -822,16 +1032,16 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
         "phase": phase,
         "next_phase": next_phase,
         "view": view,
-        "round": session["current_round"],
         "qc": qc,
         "timestamp": datetime.now().isoformat()
     }
     
-    # 将完整的 QC 广播消息写入会话历史，便于 get_session_history 做轮次与动画解析
+    # 将完整的 QC 广播消息写入会话历史
     session["messages"]["qc"].append(qc_message)
     
-    # Leader 广播 QC 到所有节点
-    count_message_sent(session_id, is_broadcast=True)
+    # Leader 广播 QC 到所有节点（HotStuff 星型拓扑）
+    n = session["config"]["nodeCount"]
+    count_message_sent(session_id, is_broadcast=True, target_count=n - 1)
     await sio.emit('message_received', qc_message, room=session_id)
     await sio.emit('phase_update', {
         "phase": next_phase,
@@ -840,17 +1050,24 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
         "view": view
     }, room=session_id)
     
-    print(f"Leader {leader_id} 收到 {len(voters)} 票，生成QC并进入 {next_phase}")
+    print(f"Leader {leader_id} 收到 {len(voters)} 票，生成 {phase} QC 并进入 {next_phase} 阶段（View {view}）")
+    
+    # 通知所有节点处理 QC（更新 prepareQC/lockedQC）
+    for node_id in range(n):
+        await handle_qc_message(session_id, qc_message, node_id)
     
     pending[key] = voters
 
     # HotStuff 多阶段自动推进：在进入下一阶段后，调度机器人自动投票
     # next_phase 可能是 pre-commit / commit / decide
-    try:
-        asyncio.create_task(trigger_robot_votes(session_id, view, next_phase, value))
-    except RuntimeError as e:
-        # 在无事件循环环境下的防御性日志（理论上不会发生）
-        print(f"调度 trigger_robot_votes 失败: {e}")
+    if next_phase == "decide":
+        # Decide 阶段完成，达成共识
+        await finalize_consensus(session_id, "共识成功", f"View {view} 达成共识")
+    else:
+        try:
+            asyncio.create_task(trigger_robot_votes(session_id, view, next_phase, value))
+        except RuntimeError as e:
+            print(f"调度 trigger_robot_votes 失败: {e}")
 @sio.event
 async def choose_normal_consensus(sid, data):
     """处理人类节点选择正常共识"""
@@ -960,26 +1177,31 @@ async def check_and_start_consensus(session_id: str):
         await start_consensus(session_id)
 
 async def start_consensus(session_id: str):
-    """开始共识过程 - 仅用于第一轮共识的初始化"""
+    """
+    开始共识过程 - HotStuff 第一轮共识的初始化
+    
+    对于第一个 View（View 0），Leader 直接发送 Proposal（不需要 New-View）
+    """
     session = get_session(session_id)
     if not session:
         return
     
     session["status"] = "running"
-    session["phase"] = "pre-prepare"
+    session["phase"] = "new-view"  # HotStuff 第一阶段是 new-view
     session["phase_step"] = 0
     
-    print(f"会话 {session_id} 开始PBFT共识流程")
+    print(f"会话 {session_id} 开始 HotStuff 共识流程 (View 0)")
     
-    # 通知所有节点进入预准备阶段
+    # 通知所有节点进入 new-view 阶段
     await sio.emit('phase_update', {
-        "phase": "pre-prepare",
+        "phase": "new-view",
         "step": 0,
-        "isMyTurn": False
+        "leader": session["leader_id"],
+        "view": session["current_view"]
     }, room=session_id)
     
-    # 提议者发送预准备消息（统一使用robot_send_pre_prepare）
-    await robot_send_pre_prepare(session_id)
+    # 第一个 View 的 Leader 直接发送 Proposal（不需要收集 NEW-VIEW）
+    await robot_send_pre_prepare(session_id, highQC=None)
 
 async def start_prepare_phase(session_id: str):
     """开始准备阶段"""
@@ -1096,24 +1318,29 @@ async def check_commit_phase(session_id: str):
         print(f"提交阶段等待中 - 正确消息:{len(correct_nodes)}, 错误消息:{len(error_nodes)}")
 
 async def finalize_consensus(session_id: str, status: str = "共识完成", description: str = "共识已完成"):
-    """完成共识"""
+    """
+    完成共识（HotStuff Decide 阶段达成共识）
+    
+    注意：HotStuff 中，一旦进入 Decide 阶段即达成共识，不会再有下一"轮"
+    如果需要继续共识新的提案，应该开始新的 View（通过 New-View 机制）
+    """
     session = get_session(session_id)
     if not session:
         return
     
-    # 防止重复调用
-    current_round = session["current_round"]
-    if session.get("consensus_finalized_round") == current_round:
-        print(f"第{current_round}轮共识已完成，跳过重复调用")
+    # 防止重复调用（基于 view）
+    current_view = session["current_view"]
+    if session.get("consensus_finalized_view") == current_view:
+        print(f"View {current_view} 共识已完成，跳过重复调用")
         return
     
-    session["consensus_finalized_round"] = current_round
-    print(f"第{current_round}轮共识完成处理开始")
+    session["consensus_finalized_view"] = current_view
+    print(f"View {current_view} 共识完成处理开始")
     
     # 取消超时任务
     if session.get("timeout_task"):
         session["timeout_task"].cancel()
-        print(f"第{session['current_round']}轮共识已完成，取消超时任务")
+        print(f"View {current_view} 共识已完成，取消超时任务")
     
     session["phase"] = "completed"
     session["phase_step"] = 3
@@ -1169,37 +1396,121 @@ async def finalize_consensus(session_id: str, status: str = "共识完成", desc
         "isMyTurn": False
     }, room=session_id)
     
-    print(f"会话 {session_id} 第{session['current_round']}轮共识完成: {status}")
+    print(f"会话 {session_id} View {session['current_view']} 共识完成: {status}")
     
-    # 保存共识历史
+    # 保存共识历史（使用 view 作为标识）
     session["consensus_history"].append({
-        "round": session["current_round"],
+        "view": session["current_view"],
         "status": status,
         "description": description,
         "timestamp": datetime.now().isoformat()
     })
     
-    # 启动下一轮共识（10秒后）
-    print(f"将在10秒后开始第{session['current_round'] + 1}轮共识")
-    asyncio.create_task(start_next_round(session_id))
+    # HotStuff 中，一次共识完成不代表需要"下一轮"
+    # 如果需要继续共识，应该通过 New-View 机制开始新的 View
+    # 这里我们保持会话状态为 completed，不再自动启动下一轮
+    print(f"View {session['current_view']} 共识完成，会话状态设为 completed")
 
-async def handle_consensus_timeout(session_id: str, round_number: int):
-    """处理共识超时"""
+async def handle_consensus_timeout(session_id: str, view: int):
+    """
+    处理共识超时（HotStuff View Change 机制）
+    
+    超时不代表失败，而是触发 View Change：
+    1. 所有节点发送 NEW-VIEW 消息给 Next Leader
+    2. Next Leader 收集 2f+1 个 NEW-VIEW 消息后选出 HighQC
+    3. 进入下一个视图继续共识
+    
+    参数:
+        session_id: 会话ID
+        view: 超时的视图号
+    """
     await asyncio.sleep(40)  # 等待40秒
     
     session = get_session(session_id)
     if not session:
         return
     
-    # 检查是否仍然在同一轮次且未完成共识
-    if session["current_round"] == round_number and session["status"] == "running":
-        print(f"第{round_number}轮共识超时（40秒未完成），判定为共识失败")
+    # 检查是否仍然在同一视图且未完成共识
+    if session["current_view"] == view and session["status"] == "running":
+        print(f"View {view} 共识超时（40秒未完成），触发 View Change")
         
-        # 清除超时任务引用，避免在finalize_consensus中尝试取消正在执行的任务
+        # 清除超时任务引用
         session["timeout_task"] = None
         
-        # 设置共识结果为超时失败
-        await finalize_consensus(session_id, "共识超时失败", "40秒内未达成共识")
+        # 触发 View Change（HotStuff Liveness 机制）
+        await trigger_view_change(session_id, view)
+
+async def trigger_view_change(session_id: str, old_view: int):
+    """
+    触发 View Change（HotStuff New-View 机制）
+    
+    所有节点发送 NEW-VIEW 消息给 Next Leader，携带自己最高的 prepareQC
+    Next Leader 收集 2f+1 个 NEW-VIEW 消息后，选择最高的 HighQC 并发送 Proposal
+    """
+    session = get_session(session_id)
+    if not session:
+        return
+    
+    new_view = old_view + 1
+    n = session["config"]["nodeCount"]
+    next_leader_id = get_current_leader(session, new_view)
+    
+    print(f"触发 View Change: View {old_view} -> View {new_view} (Next Leader: {next_leader_id})")
+    
+    # 更新当前视图
+    session["current_view"] = new_view
+    session["leader_id"] = next_leader_id
+    
+    # 所有节点发送 NEW-VIEW 消息给 Next Leader
+    for node_id in range(n):
+        node_state = session["node_states"].get(node_id, {})
+        highQC = node_state.get("highQC")  # 节点最高的 prepareQC
+        
+        new_view_msg = {
+            "from": node_id,
+            "to": next_leader_id,
+            "type": "new_view",
+            "view": new_view,
+            "old_view": old_view,
+            "highQC": highQC,  # 携带最高的 QC
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        session["messages"]["new_view"].append(new_view_msg)
+        
+        # 如果是机器人节点，直接在后端处理；如果是人类节点，通过 WebSocket 发送
+        if node_id in session.get("robot_nodes", []):
+            # 机器人节点：直接在后端记录
+            print(f"节点 {node_id}: 发送 NEW-VIEW 消息给 Next Leader {next_leader_id} (highQC.view={highQC.get('view') if highQC else None})")
+        else:
+            # 人类节点：通过 WebSocket 发送
+            node_sid = node_sockets.get(session_id, {}).get(node_id)
+            if node_sid:
+                count_message_sent(session_id, is_broadcast=False)
+                await sio.emit('message_received', new_view_msg, room=node_sid)
+        
+        # Leader 收集 NEW-VIEW 消息
+        if node_id == next_leader_id:
+            continue  # Leader 不给自己发送
+        
+        pending_new_views = session.setdefault("pending_new_views", {})
+        if new_view not in pending_new_views:
+            pending_new_views[new_view] = {}
+        pending_new_views[new_view][node_id] = new_view_msg
+    
+    # 统计消息数（星型拓扑：N-1 个节点发送给 Leader）
+    count_message_sent(session_id, is_broadcast=False, target_count=n - 1)
+    
+    # 通知所有节点进入 New-View 阶段
+    await sio.emit('phase_update', {
+        "phase": "new-view",
+        "step": 0,
+        "leader": next_leader_id,
+        "view": new_view
+    }, room=session_id)
+    
+    # Next Leader 检查是否已收集到足够的 NEW-VIEW 消息并开始新视图共识
+    await start_new_view_consensus(session_id, new_view)
 
 async def start_next_round(session_id: str):
     """启动下一轮共识"""
@@ -1288,8 +1599,9 @@ async def start_next_round(session_id: str):
     
     print(f"第{current_round}轮开始，所有节点（包括新加入的人类节点）现在可以参与共识")
     
-    # 机器人提议者发送预准备消息
-    await robot_send_pre_prepare(session_id)
+    # 机器人提议者发送预准备消息（注意：HotStuff 中应该通过 View Change 继续，而不是"下一轮"）
+    # 这里保留以兼容旧代码，但实际上应该通过 trigger_view_change 来继续共识
+    await robot_send_pre_prepare(session_id, highQC=None)
 
 # ==================== 辅助函数 ====================
 
@@ -1339,60 +1651,115 @@ async def create_robot_nodes_and_start(session_id: str, robot_count: int):
     await start_pbft_process(session_id)
 
 async def start_pbft_process(session_id: str):
-    """启动PBFT共识流程"""
+    """
+    启动 HotStuff 共识流程（函数名保留为 start_pbft_process 以兼容旧代码）
+    
+    对于第一个 View（View 0），Leader 直接发送 Proposal（不需要 New-View）
+    """
     session = get_session(session_id)
     if not session:
         return
     
     # 更新会话状态
     session["status"] = "running"
-    session["phase"] = "pre-prepare"
+    session["phase"] = "new-view"  # HotStuff 第一阶段是 new-view
     session["phase_step"] = 0
     
-    # 通知所有节点进入预准备阶段
+    # 通知所有节点进入 new-view 阶段
     await sio.emit('phase_update', {
-        "phase": "pre-prepare",
+        "phase": "new-view",
         "step": 0,
-        "isMyTurn": False
+        "leader": session["leader_id"],
+        "view": session["current_view"]
     }, room=session_id)
     
-    print(f"会话 {session_id} 开始PBFT共识流程")
+    print(f"会话 {session_id} 开始 HotStuff 共识流程 (View {session['current_view']})")
     
-    # 提议者发送预准备消息
-    await robot_send_pre_prepare(session_id)
+    # 第一个 View 的 Leader 直接发送 Proposal（不需要收集 NEW-VIEW）
+    await robot_send_pre_prepare(session_id, highQC=None)
 
-async def robot_send_pre_prepare(session_id: str):
-    """机器人提议者发送预准备消息"""
+async def start_new_view_consensus(session_id: str, view: int):
+    """
+    开始新视图的共识（HotStuff New-View 机制）
+    
+    如果 Leader 已收集到 2f+1 个 NEW-VIEW 消息，则选择最高的 HighQC 并发送 Proposal
+    """
     session = get_session(session_id)
     if not session:
         return
     
-    # 防止重复调用
-    current_round = session["current_round"]
-    if session.get("last_pre_prepare_round") == current_round:
-        print(f"第{current_round}轮预准备消息已发送，跳过重复调用")
+    leader_id = get_current_leader(session, view)
+    pending_new_views = session.get("pending_new_views", {}).get(view, {})
+    
+    n = session["config"]["nodeCount"]
+    f = (n - 1) // 3
+    threshold = 2 * f + 1
+    
+    if len(pending_new_views) < threshold:
+        print(f"View {view}: Leader {leader_id} 仅收集到 {len(pending_new_views)}/{threshold} 个 NEW-VIEW 消息，等待更多")
         return
     
-    session["last_pre_prepare_round"] = current_round
+    # 选择最高的 HighQC（New-View 机制的核心）
+    highQC = None
+    max_view = -1
+    for node_id, new_view_msg in pending_new_views.items():
+        qc = new_view_msg.get("highQC")
+        if qc:
+            qc_view = qc.get("view", -1)
+            if qc_view > max_view:
+                max_view = qc_view
+                highQC = qc
+    
+    print(f"View {view}: Leader {leader_id} 选出 HighQC (view={max_view})，开始发送 Proposal")
+    
+    # 如果 Leader 是机器人节点，自动发送 Proposal
+    if leader_id in session.get("robot_nodes", []):
+        await robot_send_pre_prepare(session_id, highQC)
+    else:
+        print(f"View {view}: Leader {leader_id} 是人类节点，等待手动发送 Proposal")
+
+async def robot_send_pre_prepare(session_id: str, highQC: Optional[Dict] = None):
+    """
+    Leader 发送 Proposal 消息（HotStuff PRE-PREPARE）
+    
+    参数:
+        session_id: 会话ID
+        highQC: 从 New-View 消息中选出的最高 QC（可选）
+    """
+    session = get_session(session_id)
+    if not session:
+        return
+    
+    # 防止重复调用（基于 view）
+    current_view = session["current_view"]
+    if session.get("last_pre_prepare_view") == current_view:
+        print(f"View {current_view} 的 Proposal 已发送，跳过重复调用")
+        return
+    
+    session["last_pre_prepare_view"] = current_view
     
     config = session["config"]
     proposer_id = get_current_leader(session)  # 当前视图的Leader作为提议者
     
-    # 只有当节点0是机器人节点时才自动发送
-    if proposer_id not in session["robot_nodes"]:
-        print(f"提议者 {proposer_id} 是人类节点，等待人类操作")
+    # 只有当 Leader 是机器人节点时才自动发送
+    if proposer_id not in session.get("robot_nodes", []):
+        print(f"Leader {proposer_id} 是人类节点，等待人类操作")
         return
     
-    # 发送预准备消息（Leader广播Proposal）
+    # 如果提供了 highQC，使用 highQC 的 value；否则使用配置的 proposalValue
+    proposal_value = config["proposalValue"]
+    if highQC:
+        proposal_value = highQC.get("value", config["proposalValue"])
+    
+    # 发送 Proposal 消息（Leader广播Proposal，HotStuff 星型拓扑）
     message = {
         "from": proposer_id,
         "to": "all",
         "type": "pre_prepare",
-        "value": config["proposalValue"],
-        "phase": "pre-prepare",
-        "view": session["current_view"],     # HotStuff视图
-        "round": session["current_round"],  # 兼容旧逻辑
-        "qc": None,                         # 初始无QC
+        "value": proposal_value,
+        "phase": "prepare",  # HotStuff 中 Proposal 开启 Prepare 阶段
+        "view": current_view,
+        "qc": highQC,  # 携带 HighQC（如果有）
         "timestamp": datetime.now().isoformat(),
         "tampered": False,
         "isRobot": True
@@ -1400,11 +1767,11 @@ async def robot_send_pre_prepare(session_id: str):
     
     session["messages"]["pre_prepare"].append(message)
     
-    # 广播消息：Leader -> All
-    count_message_sent(session_id, is_broadcast=True)
+    # 广播消息：Leader -> All（HotStuff 星型拓扑）
+    count_message_sent(session_id, is_broadcast=True, target_count=config["nodeCount"] - 1)
     await sio.emit('message_received', message, room=session_id)
     
-    print(f"机器人提议者 {proposer_id} 发送了预准备消息: {config['proposalValue']}")
+    print(f"Leader {proposer_id} (View {current_view}) 发送了 Proposal 消息: value={proposal_value}, highQC.view={highQC.get('view') if highQC else None}")
     
     # 进入准备阶段
     await asyncio.sleep(1)
@@ -1414,26 +1781,31 @@ async def robot_send_pre_prepare(session_id: str):
     await sio.emit('phase_update', {
         "phase": "prepare",
         "step": 1,
-        "isMyTurn": True
+        "leader": proposer_id,
+        "view": current_view
     }, room=session_id)
     
-    print(f"会话 {session_id} 进入准备阶段")
+    print(f"会话 {session_id} View {current_view} 进入准备阶段")
     
-    # 启动超时任务（40秒后检查）
-    current_round = session["current_round"]
-    timeout_task = asyncio.create_task(handle_consensus_timeout(session_id, current_round))
+    # 启动超时任务（超时后触发 View Change，而不是结束）
+    timeout_task = asyncio.create_task(handle_consensus_timeout(session_id, current_view))
     session["timeout_task"] = timeout_task
-    print(f"第{current_round}轮共识超时检查已启动（40秒）")
+    print(f"View {current_view} 共识超时检查已启动（40秒后触发 View Change）")
     
-    # 标记所有机器人节点已收到预准备消息
-    for robot_id in session["robot_nodes"]:
-        session["robot_node_states"][robot_id]["received_pre_prepare"] = True
+    # 标记所有机器人节点已收到 Proposal（它们会自动进行 SafeNode 检查并投票）
+    for robot_id in session.get("robot_nodes", []):
+        if robot_id != proposer_id:  # Leader 不给自己投票
+            session["robot_node_states"][robot_id]["received_pre_prepare"] = True
     
-    # 机器人节点自动发送准备消息（10秒后）
+    # 机器人节点自动发送 Prepare 投票（10秒后，会进行 SafeNode 检查）
     asyncio.create_task(robot_send_prepare_messages(session_id))
 
 async def robot_send_prepare_messages(session_id: str):
-    """机器人节点自动发送准备阶段的VOTE（改为单播Leader）"""
+    """
+    机器人节点自动发送 Prepare 阶段的 VOTE（单播给 Leader）
+    
+    在发送前会进行 SafeNode 检查，只有通过检查的节点才会投票
+    """
     session = get_session(session_id)
     if not session:
         return
@@ -1441,8 +1813,18 @@ async def robot_send_prepare_messages(session_id: str):
     config = session["config"]
     current_view = session["current_view"]
     
+    # 找到最新的 Proposal 消息
+    proposal_msgs = [m for m in session["messages"]["pre_prepare"] if m.get("view") == current_view]
+    if not proposal_msgs:
+        print(f"View {current_view}: 未找到 Proposal 消息，机器人节点不投票")
+        return
+    
+    proposal_msg = proposal_msgs[-1]  # 取最新的
+    proposal_value = proposal_msg.get("value")
+    proposal_qc = proposal_msg.get("qc")
+    
     # 等待10秒后发送准备阶段投票
-    print(f"机器人节点将在10秒后发送 VOTE(prepare) 给 Leader")
+    print(f"View {current_view}: 机器人节点将在10秒后发送 VOTE(prepare) 给 Leader")
     await asyncio.sleep(10)
     
     session = get_session(session_id)
@@ -1454,25 +1836,36 @@ async def robot_send_prepare_messages(session_id: str):
         print(f"视图已改变（{current_view} -> {session['current_view']}），放弃发送投票")
         return
     
-    # 所有机器人验证者（除了Leader）发送准备阶段VOTE
-    for robot_id in session["robot_nodes"]:
-        if robot_id == get_current_leader(session):  # Leader不发送投票
+    # 所有机器人验证者（除了Leader）进行 SafeNode 检查并发送投票
+    leader_id = get_current_leader(session)
+    for robot_id in session.get("robot_nodes", []):
+        if robot_id == leader_id:  # Leader不给自己投票
             continue
         
-        if session["robot_node_states"][robot_id]["sent_prepare"]:
+        if session["robot_node_states"][robot_id].get("sent_prepare"):
             continue  # 已经发送过了
         
-        # 调用发送投票的函数
-        await handle_robot_prepare(session_id, robot_id, config["proposalValue"])
+        # SafeNode 检查（HotStuff Safety 要求）
+        if not check_safe_node(session, robot_id, current_view, proposal_value, proposal_qc):
+            print(f"机器人节点 {robot_id}: SafeNode 检查失败，拒绝投票（View {current_view}）")
+            continue
+        
+        # 通过 SafeNode 检查，发送投票
+        await handle_robot_prepare(session_id, robot_id, proposal_value)
         session["robot_node_states"][robot_id]["sent_prepare"] = True
 
 async def handle_robot_prepare(session_id: str, robot_id: int, value: int):
-    """处理机器人节点的准备阶段投票（VOTE -> Leader 单播）"""
+    """
+    处理机器人节点的 Prepare 阶段投票（VOTE -> Leader 单播，HotStuff 星型拓扑）
+    
+    注意：此函数假设已经通过了 SafeNode 检查
+    """
     session = get_session(session_id)
     if not session:
         return
     
-    leader_id = get_current_leader(session)
+    current_view = session["current_view"]
+    leader_id = get_current_leader(session, current_view)
     leader_sid = node_sockets.get(session_id, {}).get(leader_id)
     
     vote_message = {
@@ -1481,8 +1874,7 @@ async def handle_robot_prepare(session_id: str, robot_id: int, value: int):
         "type": "vote",
         "value": value,
         "phase": "prepare",
-        "view": session["current_view"],
-        "round": session["current_round"],  # 兼容旧逻辑
+        "view": current_view,
         "qc": None,
         "timestamp": datetime.now().isoformat(),
         "tampered": False,
@@ -1494,7 +1886,7 @@ async def handle_robot_prepare(session_id: str, robot_id: int, value: int):
     if leader_sid:
         count_message_sent(session_id, is_broadcast=False)
         await sio.emit('message_received', vote_message, room=leader_sid)
-        print(f"机器人节点 {robot_id} 向 Leader {leader_id} 发送 VOTE(prepare)")
+        print(f"机器人节点 {robot_id} 向 Leader {leader_id} 发送 VOTE(prepare) [View {current_view}]")
     else:
         print(f"Leader {leader_id} 不在线，缓存机器人投票")
     

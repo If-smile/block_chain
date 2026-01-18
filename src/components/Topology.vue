@@ -212,8 +212,12 @@ export default {
 
     // 5. 动画引擎 (关键修复)
     const runAnimation = (messages, doneCallback) => {
+       console.log("[runAnimation] 收到消息数组:", messages);
+       console.log("[runAnimation] 消息数量:", messages?.length || 0);
+       
        const positions = nodePositions.value;
        if (!positions || positions.length === 0) {
+           console.log("[runAnimation] 警告: 节点位置为空，跳过动画");
            if(doneCallback) doneCallback(); 
            return;
        }
@@ -249,12 +253,20 @@ export default {
            });
        });
        
+       console.log("[runAnimation] 解析后的动画数量:", animations.length);
+       console.log("[runAnimation] 动画详情:", animations.map(a => ({
+         from: `${a.start.x},${a.start.y}`,
+         to: `${a.end.x},${a.end.y}`,
+         value: a.value
+       })));
+       
        if(!animations.length) { 
+           console.log("[runAnimation] 警告: 没有有效的动画目标，跳过播放");
            if(doneCallback) doneCallback(); 
            return; 
        }
        
-       console.log(`播放动画帧: ${animations.length} 个小球`);
+       console.log(`[runAnimation] 开始播放动画帧: ${animations.length} 个小球`);
 
        const loop = () => {
            // 1. 清空画布并重绘背景拓扑
@@ -301,10 +313,17 @@ export default {
     };
 
     const startAnimation = () => {
+        console.log("[startAnimation] 被调用");
+        console.log("[startAnimation] simulationResult:", props.simulationResult);
+        console.log("[startAnimation] animation_sequence:", props.simulationResult?.animation_sequence);
+        
         if (props.simulationResult?.animation_sequence) {
-            console.log("收到共识结果，开始播放序列动画...");
+            console.log("[startAnimation] 收到共识结果，开始播放序列动画...");
+            console.log("[startAnimation] 序列步骤数:", props.simulationResult.animation_sequence.length);
             finalConsensus.value = "";
             playSequence(props.simulationResult.animation_sequence, 0);
+        } else {
+            console.log("[startAnimation] 警告: animation_sequence 不存在或为空");
         }
     };
 
@@ -314,10 +333,17 @@ export default {
     });
 
     // 使用 deep: true 确保深度监听
-    watch(() => props.simulationResult, startAnimation, { deep: true });
-    watch([() => props.nodeCount, () => props.branchCount], drawTopology);
+    watch(() => props.simulationResult, (newVal, oldVal) => {
+        console.log("[watch] simulationResult 变化:", { newVal, oldVal });
+        startAnimation();
+    }, { deep: true, immediate: false });
+    
+    watch([() => props.nodeCount, () => props.branchCount], () => {
+        console.log("[watch] nodeCount 或 branchCount 变化，重绘拓扑");
+        drawTopology();
+    });
 
-    return { canvas, finalConsensus };
+    return { canvas, finalConsensus, startAnimation };
   }
 };
 </script>

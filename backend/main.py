@@ -154,14 +154,14 @@ def get_topology_info(session: Dict[str, Any], node_id: int, view: Optional[int]
     双层 HotStuff 拓扑信息：返回节点的角色和上级ID
 
     角色定义:
-    - 'root': Root (节点 0)
-    - 'group_leader': Group Leader (每个组的第一个节点，非 0)
+    - 'root': Global Leader (动态计算: view % n)
+    - 'group_leader': Group Leader (每个组的第一个节点，非 Global Leader)
     - 'member': Group Member (普通组员)
 
     参数:
         session: 会话数据
         node_id: 节点ID
-        view: 视图号（可选，保留接口兼容，不参与分组计算）
+        view: 视图号（用于计算 Global Leader，默认使用当前视图）
 
     返回:
         {
@@ -174,9 +174,14 @@ def get_topology_info(session: Dict[str, Any], node_id: int, view: Optional[int]
     n = session["config"]["nodeCount"]
     branch_count = session["config"].get("branchCount", 2)  # 分组数 K
     branch_count = max(1, int(branch_count))
+    
+    # 计算 Global Leader (根据 view 动态计算)
+    if view is None:
+        view = session.get("current_view", 0)
+    global_leader_id = view % n
 
-    # Root 永远是 0
-    if node_id == 0:
+    # Root: 当前视图的 Global Leader
+    if node_id == global_leader_id:
         return {
             "role": "root",
             "parent_id": None,
@@ -184,26 +189,26 @@ def get_topology_info(session: Dict[str, Any], node_id: int, view: Optional[int]
             "group_size": None
         }
 
-    # 使用 ceil 分组，确保覆盖所有节点
-    group_size = max(1, math.ceil(n / branch_count))
+    # 使用 floor 分组（与前端逻辑一致）
+    group_size = max(1, n // branch_count)
     group_id = node_id // group_size
-    leader_id = group_id * group_size
+    group_start_id = group_id * group_size
     group_end_id = min((group_id + 1) * group_size, n)
-    actual_group_size = max(0, group_end_id - leader_id)
+    actual_group_size = max(0, group_end_id - group_start_id)
 
-    # Group Leader: 每组第一个节点（非 0）
-    if node_id == leader_id and node_id != 0:
+    # Group Leader: 每组第一个节点（非 Global Leader）
+    if node_id == group_start_id and node_id != global_leader_id:
         return {
             "role": "group_leader",
-            "parent_id": 0,
+            "parent_id": global_leader_id,  # 上级是 Global Leader
             "group_id": group_id,
             "group_size": actual_group_size
         }
 
-    # Group Member
+    # Group Member: 上级是 Group Leader
     return {
         "role": "member",
-        "parent_id": leader_id,
+        "parent_id": group_start_id,
         "group_id": group_id,
         "group_size": actual_group_size
     }
@@ -531,7 +536,7 @@ async def get_connected_nodes(session_id: str):
 
 @app.get("/api/sessions/{session_id}/history")
 async def get_session_history(session_id: str, round: Optional[int] = None):
-    """获取会话的真实消息历史，适配 HotStuff 表格和动画"""
+    """获取会话的真实消息历史，适配 HotStuff 表格和动画（支持双层分层动画）"""
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -540,7 +545,12 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     messages = session["messages"]
     n = config["nodeCount"]
     topology = config["topology"]
-    n_value = config.get("branchCount", 2)
+    branch_count = config.get("branchCount", 2)
+    is_double_layer = branch_count > 1 and n >= branch_count * 2
+    
+    # 获取当前视图（用于计算 Global Leader）
+    view = session.get("current_view", 0)
+    global_leader_id = view % n
     
     # 1. 确定轮次范围
     if round is None:
@@ -565,12 +575,16 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     # 辅助函数：按轮次过滤
     def get_msgs(key, r):
         return [m for m in messages.get(key, []) if m.get("round") == r]
+    
+    # 辅助函数：获取节点的拓扑信息
+    def get_node_topology(node_id):
+        return get_topology_info(session, node_id, view)
 
     round_pre_prepare = get_msgs("pre_prepare", round)
     round_votes = get_msgs("vote", round)
     round_qc = get_msgs("qc", round)
 
-    # === 构建 HotStuff 7步 流程 ===
+    # === 构建 HotStuff 7步 流程（支持双层分层动画）===
 
     # Step 1: Proposal (Leader -> All) [Phase: Prepare]
     step1_anim: List[Dict[str, Any]] = []
@@ -585,22 +599,75 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
         # 动画数据：拆分广播
         src = msg["from"]
         value = msg.get("value")
-        if msg.get("to") == "all":
+        
+        if is_double_layer:
+            # 双层模式：Root -> Group Leaders -> Members（分两步）
+            # 子帧 1: Root -> Group Leaders
+            step1a: List[Dict[str, Any]] = []
+            # 子帧 2: Group Leaders -> Members
+            step1b: List[Dict[str, Any]] = []
+            
             for dst in range(n):
-                if dst != src and is_connection_allowed(src, dst, n, topology, n_value):
-                    step1_anim.append({"src": src, "dst": dst, "value": value, "type": "proposal"})
+                if dst == src:
+                    continue
+                dst_info = get_node_topology(dst)
+                if dst_info["role"] == "group_leader":
+                    step1a.append({"src": src, "dst": dst, "value": value, "type": "proposal", "dst_type": "group_leaders"})
+                elif dst_info["role"] == "member":
+                    # 找到该 Member 的 Group Leader
+                    gl_id = dst_info["parent_id"]
+                    step1b.append({"src": gl_id, "dst": dst, "value": value, "type": "proposal", "dst_type": "group_members"})
+            
+            if step1a:
+                animation_sequence.append(step1a)
+            if step1b:
+                animation_sequence.append(step1b)
         else:
-            step1_anim.append({"src": src, "dst": msg.get("to"), "value": value, "type": "proposal"})
-    animation_sequence.append(step1_anim)
+            # 单层模式：直接广播
+            if msg.get("to") == "all":
+                for dst in range(n):
+                    if dst != src and is_connection_allowed(src, dst, n, topology, branch_count):
+                        step1_anim.append({"src": src, "dst": dst, "value": value, "type": "proposal"})
+            else:
+                step1_anim.append({"src": src, "dst": msg.get("to"), "value": value, "type": "proposal"})
+            if step1_anim:
+                animation_sequence.append(step1_anim)
 
     # Step 2: Prepare Vote (All -> Leader) [Phase: Prepare]
-    step2_msgs: List[Dict[str, Any]] = []
+    step2_votes: List[Dict[str, Any]] = []
     for msg in round_votes:
         if msg.get("phase") == "prepare":
             m = {"src": msg["from"], "dst": msg["to"], "value": msg.get("value"), "type": "vote", "phase": "prepare"}
-            step2_msgs.append(m)
+            step2_votes.append(m)
             table_messages.append(m)
-    animation_sequence.append(step2_msgs)
+    
+    if is_double_layer:
+        # 双层模式：Member -> Group Leader -> Root（分两步）
+        # 子帧 1: Member -> Group Leader
+        step2a: List[Dict[str, Any]] = []
+        # 子帧 2: Group Leader -> Root
+        step2b: List[Dict[str, Any]] = []
+        
+        for vote in step2_votes:
+            src_id = vote["src"]
+            src_info = get_node_topology(src_id)
+            dst_id = vote["dst"]
+            
+            if src_info["role"] == "member":
+                # Member 投票给 Group Leader
+                gl_id = src_info["parent_id"]
+                step2a.append({"src": src_id, "dst": gl_id, "value": vote["value"], "type": "vote", "phase": "prepare"})
+            elif src_info["role"] == "group_leader" and dst_id == global_leader_id:
+                # Group Leader 投票给 Root
+                step2b.append({"src": src_id, "dst": dst_id, "value": vote["value"], "type": "vote", "phase": "prepare"})
+        
+        if step2a:
+            animation_sequence.append(step2a)
+        if step2b:
+            animation_sequence.append(step2b)
+    else:
+        if step2_votes:
+            animation_sequence.append(step2_votes)
 
     # Step 3: Pre-Commit QC (Leader -> All) [Phase: Pre-Commit]
     step3_anim: List[Dict[str, Any]] = []
@@ -616,20 +683,64 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
             # 动画数据
             src = msg["from"]
             value = msg.get("qc", {}).get("value")
-            if msg.get("to") == "all":
+            
+            if is_double_layer:
+                # 双层模式：Root -> Group Leaders -> Members（分两步）
+                step3a: List[Dict[str, Any]] = []
+                step3b: List[Dict[str, Any]] = []
+                
                 for dst in range(n):
-                    if dst != src and is_connection_allowed(src, dst, n, topology, n_value):
-                        step3_anim.append({"src": src, "dst": dst, "value": value, "type": "qc"})
-    animation_sequence.append(step3_anim)
+                    if dst == src:
+                        continue
+                    dst_info = get_node_topology(dst)
+                    if dst_info["role"] == "group_leader":
+                        step3a.append({"src": src, "dst": dst, "value": value, "type": "qc", "dst_type": "group_leaders"})
+                    elif dst_info["role"] == "member":
+                        gl_id = dst_info["parent_id"]
+                        step3b.append({"src": gl_id, "dst": dst, "value": value, "type": "qc", "dst_type": "group_members"})
+                
+                if step3a:
+                    animation_sequence.append(step3a)
+                if step3b:
+                    animation_sequence.append(step3b)
+            else:
+                if msg.get("to") == "all":
+                    for dst in range(n):
+                        if dst != src and is_connection_allowed(src, dst, n, topology, branch_count):
+                            step3_anim.append({"src": src, "dst": dst, "value": value, "type": "qc"})
+                if step3_anim:
+                    animation_sequence.append(step3_anim)
 
     # Step 4: Pre-Commit Vote (All -> Leader) [Phase: Pre-Commit]
-    step4_msgs: List[Dict[str, Any]] = []
+    step4_votes: List[Dict[str, Any]] = []
     for msg in round_votes:
         if msg.get("phase") == "pre-commit": 
             m = {"src": msg["from"], "dst": msg["to"], "value": msg.get("value"), "type": "vote", "phase": "pre-commit"}
-            step4_msgs.append(m)
+            step4_votes.append(m)
             table_messages.append(m)
-    animation_sequence.append(step4_msgs)
+    
+    if is_double_layer:
+        step4a: List[Dict[str, Any]] = []
+        step4b: List[Dict[str, Any]] = []
+        
+        for vote in step4_votes:
+            src_id = vote["src"]
+            src_info = get_node_topology(src_id)
+            dst_id = vote["dst"]
+            
+            if src_info["role"] == "member":
+                gl_id = src_info["parent_id"]
+                step4a.append({"src": src_id, "dst": gl_id, "value": vote["value"], "type": "vote", "phase": "pre-commit"})
+            elif src_info["role"] == "group_leader" and dst_id == global_leader_id:
+                step4b.append({"src": src_id, "dst": dst_id, "value": vote["value"], "type": "vote", "phase": "pre-commit"})
+        
+        if step4a:
+            animation_sequence.append(step4a)
+        if step4b:
+            animation_sequence.append(step4b)
+    else:
+        if step4_votes:
+            animation_sequence.append(step4_votes)
 
     # Step 5: Commit QC (Leader -> All) [Phase: Commit]
     step5_anim: List[Dict[str, Any]] = []
@@ -645,20 +756,63 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
             # 动画数据
             src = msg["from"]
             value = msg.get("qc", {}).get("value")
-            if msg.get("to") == "all":
+            
+            if is_double_layer:
+                step5a: List[Dict[str, Any]] = []
+                step5b: List[Dict[str, Any]] = []
+                
                 for dst in range(n):
-                    if dst != src and is_connection_allowed(src, dst, n, topology, n_value):
-                        step5_anim.append({"src": src, "dst": dst, "value": value, "type": "qc"})
-    animation_sequence.append(step5_anim)
+                    if dst == src:
+                        continue
+                    dst_info = get_node_topology(dst)
+                    if dst_info["role"] == "group_leader":
+                        step5a.append({"src": src, "dst": dst, "value": value, "type": "qc", "dst_type": "group_leaders"})
+                    elif dst_info["role"] == "member":
+                        gl_id = dst_info["parent_id"]
+                        step5b.append({"src": gl_id, "dst": dst, "value": value, "type": "qc", "dst_type": "group_members"})
+                
+                if step5a:
+                    animation_sequence.append(step5a)
+                if step5b:
+                    animation_sequence.append(step5b)
+            else:
+                if msg.get("to") == "all":
+                    for dst in range(n):
+                        if dst != src and is_connection_allowed(src, dst, n, topology, branch_count):
+                            step5_anim.append({"src": src, "dst": dst, "value": value, "type": "qc"})
+                if step5_anim:
+                    animation_sequence.append(step5_anim)
 
     # Step 6: Commit Vote (All -> Leader) [Phase: Commit]
-    step6_msgs: List[Dict[str, Any]] = []
+    step6_votes: List[Dict[str, Any]] = []
     for msg in round_votes:
         if msg.get("phase") == "commit":
             m = {"src": msg["from"], "dst": msg["to"], "value": msg.get("value"), "type": "vote", "phase": "commit"}
-            step6_msgs.append(m)
+            step6_votes.append(m)
             table_messages.append(m)
-    animation_sequence.append(step6_msgs)
+    
+    if is_double_layer:
+        step6a: List[Dict[str, Any]] = []
+        step6b: List[Dict[str, Any]] = []
+        
+        for vote in step6_votes:
+            src_id = vote["src"]
+            src_info = get_node_topology(src_id)
+            dst_id = vote["dst"]
+            
+            if src_info["role"] == "member":
+                gl_id = src_info["parent_id"]
+                step6a.append({"src": src_id, "dst": gl_id, "value": vote["value"], "type": "vote", "phase": "commit"})
+            elif src_info["role"] == "group_leader" and dst_id == global_leader_id:
+                step6b.append({"src": src_id, "dst": dst_id, "value": vote["value"], "type": "vote", "phase": "commit"})
+        
+        if step6a:
+            animation_sequence.append(step6a)
+        if step6b:
+            animation_sequence.append(step6b)
+    else:
+        if step6_votes:
+            animation_sequence.append(step6_votes)
 
     # Step 7: Decide QC (Leader -> All) [Phase: Decide]
     step7_anim: List[Dict[str, Any]] = []
@@ -674,11 +828,32 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
             # 动画数据
             src = msg["from"]
             value = msg.get("qc", {}).get("value")
-            if msg.get("to") == "all":
+            
+            if is_double_layer:
+                step7a: List[Dict[str, Any]] = []
+                step7b: List[Dict[str, Any]] = []
+                
                 for dst in range(n):
-                    if dst != src and is_connection_allowed(src, dst, n, topology, n_value):
-                        step7_anim.append({"src": src, "dst": dst, "value": value, "type": "qc"})
-    animation_sequence.append(step7_anim)
+                    if dst == src:
+                        continue
+                    dst_info = get_node_topology(dst)
+                    if dst_info["role"] == "group_leader":
+                        step7a.append({"src": src, "dst": dst, "value": value, "type": "qc", "dst_type": "group_leaders"})
+                    elif dst_info["role"] == "member":
+                        gl_id = dst_info["parent_id"]
+                        step7b.append({"src": gl_id, "dst": dst, "value": value, "type": "qc", "dst_type": "group_members"})
+                
+                if step7a:
+                    animation_sequence.append(step7a)
+                if step7b:
+                    animation_sequence.append(step7b)
+            else:
+                if msg.get("to") == "all":
+                    for dst in range(n):
+                        if dst != src and is_connection_allowed(src, dst, n, topology, branch_count):
+                            step7_anim.append({"src": src, "dst": dst, "value": value, "type": "qc"})
+                if step7_anim:
+                    animation_sequence.append(step7_anim)
 
     # 获取共识结果文本
     round_consensus = "共识进行中..."
@@ -694,9 +869,9 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     
     return {
         "round": round,
-        "leaderId": (round - 1) % config["nodeCount"],
+        "leaderId": global_leader_id,
         "messages": table_messages,               # 表格数据（含phase，未拆分广播）
-        "animation_sequence": animation_sequence, # 动画数据（7步序列，拆分广播）
+        "animation_sequence": animation_sequence, # 动画数据（支持分层，按步骤）
         "consensus": round_consensus,
         "nodeCount": config["nodeCount"],
         "topology": config["topology"],

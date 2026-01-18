@@ -548,10 +548,6 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     branch_count = config.get("branchCount", 2)
     is_double_layer = branch_count > 1 and n >= branch_count * 2
     
-    # 获取当前视图（用于计算 Global Leader）
-    view = session.get("current_view", 0)
-    global_leader_id = view % n
-    
     # 1. 确定轮次范围
     if round is None:
         # 获取所有存在的轮次
@@ -568,6 +564,31 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
             "totalRounds": len(target_rounds)
         }
 
+    # === 关键修复：从历史消息中提取该轮次的真实 View ===
+    target_view = round  # 默认 fallback（假设 round 等于 view）
+    
+    # 尝试从该轮次的消息中获取真实 view
+    all_round_msgs = []
+    if messages.get("pre_prepare"):
+        all_round_msgs.extend([m for m in messages["pre_prepare"] if m.get("round") == round])
+    if messages.get("vote"):
+        all_round_msgs.extend([m for m in messages["vote"] if m.get("round") == round])
+    if messages.get("qc"):
+        all_round_msgs.extend([m for m in messages["qc"] if m.get("round") == round])
+    
+    if all_round_msgs:
+        # 取第一个消息的 view 作为该轮次的历史视图
+        target_view = all_round_msgs[0].get("view", round)
+        # 如果第一个消息没有 view，尝试查找其他消息
+        for msg in all_round_msgs:
+            if "view" in msg:
+                target_view = msg["view"]
+                break
+    
+    # 计算历史时刻的 Global Leader（使用历史视图）
+    historical_leader_id = target_view % n
+    print(f"[get_session_history] Round {round}: 使用历史 View {target_view}, Leader ID = {historical_leader_id}")
+
     # 2. 准备数据容器
     table_messages: List[Dict[str, Any]] = []      # 表格用（合并广播，含phase）
     animation_sequence: List[List[Dict[str, Any]]] = []  # 动画用（拆分广播，按步骤）
@@ -576,9 +597,9 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     def get_msgs(key, r):
         return [m for m in messages.get(key, []) if m.get("round") == r]
     
-    # 辅助函数：获取节点的拓扑信息
+    # 辅助函数：获取节点的拓扑信息（强制使用历史视图）
     def get_node_topology(node_id):
-        return get_topology_info(session, node_id, view)
+        return get_topology_info(session, node_id, view=target_view)
 
     round_pre_prepare = get_msgs("pre_prepare", round)
     round_votes = get_msgs("vote", round)
@@ -657,8 +678,8 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                 # Member 投票给 Group Leader
                 gl_id = src_info["parent_id"]
                 step2a.append({"src": src_id, "dst": gl_id, "value": vote["value"], "type": "vote", "phase": "prepare"})
-            elif src_info["role"] == "group_leader" and dst_id == global_leader_id:
-                # Group Leader 投票给 Root
+            elif src_info["role"] == "group_leader" and dst_id == historical_leader_id:
+                # Group Leader 投票给 Root（使用历史 Leader ID）
                 step2b.append({"src": src_id, "dst": dst_id, "value": vote["value"], "type": "vote", "phase": "prepare"})
         
         if step2a:
@@ -731,7 +752,8 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
             if src_info["role"] == "member":
                 gl_id = src_info["parent_id"]
                 step4a.append({"src": src_id, "dst": gl_id, "value": vote["value"], "type": "vote", "phase": "pre-commit"})
-            elif src_info["role"] == "group_leader" and dst_id == global_leader_id:
+            elif src_info["role"] == "group_leader" and dst_id == historical_leader_id:
+                # Group Leader 投票给 Root（使用历史 Leader ID）
                 step4b.append({"src": src_id, "dst": dst_id, "value": vote["value"], "type": "vote", "phase": "pre-commit"})
         
         if step4a:
@@ -803,7 +825,8 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
             if src_info["role"] == "member":
                 gl_id = src_info["parent_id"]
                 step6a.append({"src": src_id, "dst": gl_id, "value": vote["value"], "type": "vote", "phase": "commit"})
-            elif src_info["role"] == "group_leader" and dst_id == global_leader_id:
+            elif src_info["role"] == "group_leader" and dst_id == historical_leader_id:
+                # Group Leader 投票给 Root（使用历史 Leader ID）
                 step6b.append({"src": src_id, "dst": dst_id, "value": vote["value"], "type": "vote", "phase": "commit"})
         
         if step6a:
@@ -869,7 +892,7 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     
     return {
         "round": round,
-        "leaderId": global_leader_id,
+        "leaderId": historical_leader_id,  # 返回历史时刻的 Leader ID
         "messages": table_messages,               # 表格数据（含phase，未拆分广播）
         "animation_sequence": animation_sequence, # 动画数据（支持分层，按步骤）
         "consensus": round_consensus,

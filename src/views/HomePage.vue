@@ -1,218 +1,310 @@
 <template>
-  <div class="home-page">
-    <el-container>
-      <el-header class="header">
-        <h1>分布式 HotStuff 共识系统</h1>
-        <p>创建 HotStuff 共识会话，让用户扮演节点参与共识过程</p>
-      </el-header>
+  <div class="dashboard-page">
+    <!-- 顶部统计卡片 -->
+    <el-row :gutter="16" class="metrics-row">
+      <el-col :span="6">
+        <el-card shadow="never" class="metric-card">
+          <div class="metric-content">
+            <div class="metric-icon primary-bg">
+              <el-icon :size="32"><Connection /></el-icon>
+            </div>
+            <div class="metric-info">
+              <div class="metric-label">Total Nodes</div>
+              <div class="metric-value">{{ formData.nodeCount }}</div>
+            </div>
+          </div>
+        </el-card>
+      </el-col>
       
-      <el-main class="main-content">
-        <el-row :gutter="40">
-          <!-- Left: Parameter Configuration -->
-          <el-col :span="12">
-            <el-card class="config-card">
-              <template #header>
-                <div class="card-header">
-                  <span>共识参数配置</span>
-                </div>
-              </template>
-              
-              <el-form 
-                :model="formData" 
-                :rules="rules" 
-                ref="formRef" 
-                label-width="120px"
-                class="config-form"
-              >
-                <el-form-item label="总节点数" prop="nodeCount">
-                  <el-input-number 
-                    v-model="formData.nodeCount" 
-                    :min="3" 
-                    :max="20"
-                    controls-position="right"
-                  />
-                  <span class="form-tip">建议3-20个节点</span>
-                </el-form-item>
-                
-                <el-form-item label="故障节点数" prop="faultyNodes">
-                  <el-input-number 
-                    v-model="formData.faultyNodes" 
-                    :min="0" 
-                    :max="formData.nodeCount"
-                    controls-position="right"
-                  />
-                  <span class="form-tip">所有节点都可以选择成为拜占庭节点</span>
-                </el-form-item>
-                
-                
-                <el-form-item label="拓扑结构" prop="topology">
-                  <el-select v-model="formData.topology" placeholder="选择拓扑结构">
-                    <el-option label="全连接" value="full" />
-                    <el-option label="环形" value="ring" />
-                    <el-option label="星形" value="star" />
-                    <el-option label="树形" value="tree" />
-                  </el-select>
-                </el-form-item>
-                
-                <el-form-item label="分组数量 (branchCount)" prop="branchCount">
-                  <el-input-number 
-                    v-model="formData.branchCount" 
-                    :min="1" 
-                    :max="10"
-                    controls-position="right"
-                  />
-                  <span class="form-tip">双层 HotStuff 的分组数，≥2 时启用双层结构</span>
-                </el-form-item>
-                
-                <el-form-item label="提议值" prop="proposalValue">
-                  <el-radio-group v-model="formData.proposalValue">
-                    <el-radio :label="0">0</el-radio>
-                    <el-radio :label="1">1</el-radio>
-                  </el-radio-group>
-                </el-form-item>
-                
-                <el-form-item label="提议内容" prop="proposalContent">
-                  <el-input 
-                    v-model="formData.proposalContent" 
-                    type="textarea" 
-                    :rows="3"
-                    placeholder="输入具体的提议内容，例如：'今天中午吃火锅'、'选择方案A'等"
-                  />
-                  <span class="form-tip">输入具体的提议内容，将在节点页面显示</span>
-                </el-form-item>
-                
-                <el-form-item label="恶意提议者" prop="maliciousProposer">
-                  <el-switch v-model="formData.maliciousProposer" />
-                  <span class="form-tip">启用时，提议者可能发送错误的值</span>
-                </el-form-item>
-                
-                <el-form-item label="允许消息篡改" prop="allowTampering">
-                  <el-switch v-model="formData.allowTampering" />
-                  <span class="form-tip">启用时，故障节点可能篡改消息</span>
-                </el-form-item>
-                
-                <el-form-item label="消息传递率" prop="messageDeliveryRate">
-                  <el-slider 
-                    v-model="formData.messageDeliveryRate" 
-                    :min="50" 
-                    :max="100" 
-                    :step="5"
-                    show-stops
-                    show-input
-                    :format-tooltip="(val) => `${val}%`"
-                  />
-                  <span class="form-tip">模拟网络丢包，测试网络可靠性对共识的影响</span>
-                </el-form-item>
-                
-                <el-form-item>
-                  <el-button type="primary" @click="createSession" :loading="creating">
-                    创建共识会话
-                  </el-button>
-                  <el-button type="success" @click="showDemo" :loading="simulating">
-                    <el-icon style="margin-right: 5px;"><VideoPlay /></el-icon>
-                    动画演示共识过程
-                  </el-button>
-                  <el-button @click="resetForm">重置</el-button>
-                </el-form-item>
-              </el-form>
-            </el-card>
-          </el-col>
+      <el-col :span="6">
+        <el-card shadow="never" class="metric-card">
+          <div class="metric-content">
+            <div class="metric-icon danger-bg">
+              <el-icon :size="32"><WarnTriangleFilled /></el-icon>
+            </div>
+            <div class="metric-info">
+              <div class="metric-label">Byzantine Nodes</div>
+              <div class="metric-value">{{ formData.faultyNodes }}</div>
+            </div>
+          </div>
+        </el-card>
+      </el-col>
+      
+      <el-col :span="6">
+        <el-card shadow="never" class="metric-card">
+          <div class="metric-content">
+            <div class="metric-icon success-bg">
+              <el-icon :size="32"><Cpu /></el-icon>
+            </div>
+            <div class="metric-info">
+              <div class="metric-label">Consensus Health</div>
+              <div class="metric-value">{{ consensusHealth }}%</div>
+            </div>
+          </div>
+        </el-card>
+      </el-col>
+      
+      <el-col :span="6">
+        <el-card shadow="never" class="metric-card">
+          <div class="metric-content">
+            <div class="metric-icon warning-bg">
+              <el-icon :size="32"><Grid /></el-icon>
+            </div>
+            <div class="metric-info">
+              <div class="metric-label">Network Groups</div>
+              <div class="metric-value">{{ formData.branchCount }}</div>
+            </div>
+          </div>
+        </el-card>
+      </el-col>
+    </el-row>
+    
+    <!-- 主内容区域：配置表单 + 拓扑预览 -->
+    <el-row :gutter="16" class="main-row">
+      <!-- 左侧：创世配置 -->
+      <el-col :span="8">
+        <el-card shadow="never" class="config-card">
+          <template #header>
+            <div class="section-header">
+              <div class="header-line"></div>
+              <span class="header-title">Genesis Configuration</span>
+            </div>
+          </template>
           
-          <!-- Right: QR Code and Session Information -->
-          <el-col :span="12">
-            <el-card class="qr-card" v-if="sessionInfo">
-              <template #header>
-                <div class="card-header">
-                  <span>会话信息</span>
-                </div>
-              </template>
-              
-              <div class="session-info">
-                <el-descriptions :column="1" border>
-                  <el-descriptions-item label="会话ID">{{ sessionInfo.sessionId }}</el-descriptions-item>
-                  <el-descriptions-item label="总节点数">{{ sessionInfo.config.nodeCount }}</el-descriptions-item>
-                  <el-descriptions-item label="故障节点数">{{ sessionInfo.config.faultyNodes }}</el-descriptions-item>
-                  <el-descriptions-item label="机器人节点数">{{ sessionInfo.config.robotNodes }}</el-descriptions-item>
-                  <el-descriptions-item label="人类节点数">{{ sessionInfo.config.nodeCount - sessionInfo.config.robotNodes }}</el-descriptions-item>
-                  <el-descriptions-item label="拓扑结构">{{ getTopologyName(sessionInfo.config.topology) }}</el-descriptions-item>
-                  <el-descriptions-item label="提议值">{{ sessionInfo.config.proposalValue }}</el-descriptions-item>
-                  <el-descriptions-item label="提议内容">{{ sessionInfo.config.proposalContent || '无' }}</el-descriptions-item>
-                  <el-descriptions-item label="消息传递率">{{ sessionInfo.config.messageDeliveryRate }}%</el-descriptions-item>
-                  <el-descriptions-item label="状态">{{ sessionInfo.status }}</el-descriptions-item>
-                  <el-descriptions-item label="当前视图">{{ currentView }}</el-descriptions-item>
-                  <el-descriptions-item label="当前 Leader">节点 {{ currentLeader }}</el-descriptions-item>
-                </el-descriptions>
-                
-                <div class="qr-section">
-                  <h3>扫描二维码加入节点</h3>
-                  <div class="qr-container" ref="qrContainer"></div>
-                  <p class="qr-tip">其他用户可以扫描此二维码加入共识过程</p>
-                </div>
-                
-                <div class="node-links">
-                  <h3>节点链接</h3>
-                  <el-table :data="nodeLinks" style="width: 100%">
-                    <el-table-column prop="nodeId" label="节点ID" width="80" />
-                    <el-table-column prop="url" label="链接" />
-                    <el-table-column label="操作" width="120">
-                      <template #default="scope">
-                        <el-button size="small" @click="copyLink(scope.row.url)">
-                          复制链接
-                        </el-button>
-                      </template>
-                    </el-table-column>
-                  </el-table>
-                </div>
-              </div>
-            </el-card>
+          <el-form 
+            :model="formData" 
+            :rules="rules" 
+            ref="formRef" 
+            label-width="140px"
+            label-position="left"
+            class="genesis-form"
+            size="default"
+          >
+            <el-form-item label="Node Count" prop="nodeCount">
+              <el-input-number 
+                v-model="formData.nodeCount" 
+                :min="3" 
+                :max="20"
+                controls-position="right"
+                class="full-width"
+              />
+            </el-form-item>
             
-            <el-card class="welcome-card" v-else>
-              <template #header>
-                <div class="card-header">
-                  <span>欢迎</span>
-                </div>
-              </template>
-              
-              <div class="welcome-content">
-                <el-icon size="60" color="#409EFF"><Connection /></el-icon>
-                <h2>分布式 HotStuff 共识系统</h2>
-                <p>配置参数创建 HotStuff 共识会话，生成二维码供其他用户扫描加入</p>
-                <p>每个用户将扮演一个节点，实时参与 HotStuff 共识过程</p>
-              </div>
-            </el-card>
-          </el-col>
-        </el-row>
-      </el-main>
-    </el-container>
+            <el-form-item label="Faulty Nodes" prop="faultyNodes">
+              <el-input-number 
+                v-model="formData.faultyNodes" 
+                :min="0" 
+                :max="formData.nodeCount"
+                controls-position="right"
+                class="full-width"
+              />
+            </el-form-item>
+            
+            <el-form-item label="Topology" prop="topology">
+              <el-select v-model="formData.topology" class="full-width">
+                <el-option label="Full Mesh" value="full" />
+                <el-option label="Ring" value="ring" />
+                <el-option label="Star" value="star" />
+                <el-option label="Tree" value="tree" />
+              </el-select>
+            </el-form-item>
+            
+            <el-form-item label="Branch Count" prop="branchCount">
+              <el-input-number 
+                v-model="formData.branchCount" 
+                :min="1" 
+                :max="10"
+                controls-position="right"
+                class="full-width"
+              />
+            </el-form-item>
+            
+            <el-form-item label="Proposal Value" prop="proposalValue">
+              <el-radio-group v-model="formData.proposalValue">
+                <el-radio :label="0">0</el-radio>
+                <el-radio :label="1">1</el-radio>
+              </el-radio-group>
+            </el-form-item>
+            
+            <el-form-item label="Proposal Content" prop="proposalContent">
+              <el-input 
+                v-model="formData.proposalContent" 
+                type="textarea" 
+                :rows="2"
+                placeholder="Enter proposal content..."
+              />
+            </el-form-item>
+            
+            <el-form-item label="Malicious Leader">
+              <el-switch v-model="formData.maliciousProposer" />
+            </el-form-item>
+            
+            <el-form-item label="Allow Tampering">
+              <el-switch v-model="formData.allowTampering" />
+            </el-form-item>
+            
+            <el-form-item label="Delivery Rate">
+              <el-slider 
+                v-model="formData.messageDeliveryRate" 
+                :min="50" 
+                :max="100" 
+                :step="5"
+                show-input
+                :format-tooltip="(val) => `${val}%`"
+              />
+            </el-form-item>
+            
+            <el-form-item class="action-buttons">
+              <el-button 
+                type="primary" 
+                @click="createSession" 
+                :loading="creating"
+                style="width: 100%; margin-bottom: 8px;"
+              >
+                Create Session
+              </el-button>
+              <el-button 
+                type="success" 
+                @click="showDemo" 
+                :loading="simulating"
+                style="width: 100%; margin-bottom: 8px;"
+              >
+                <el-icon style="margin-right: 5px;"><VideoPlay /></el-icon>
+                Demo Animation
+              </el-button>
+              <el-button 
+                @click="resetForm"
+                style="width: 100%;"
+              >
+                Reset
+              </el-button>
+            </el-form-item>
+          </el-form>
+        </el-card>
+      </el-col>
+      
+      <!-- 右侧：网络拓扑预览 -->
+      <el-col :span="16">
+        <el-card shadow="never" class="preview-card">
+          <template #header>
+            <div class="section-header">
+              <div class="header-line"></div>
+              <span class="header-title">Network Topology Preview</span>
+            </div>
+          </template>
+          
+          <div class="topology-preview">
+            <Topology
+              :topologyType="formData.topology"
+              :nodeCount="formData.nodeCount"
+              :byzantineNodes="formData.faultyNodes"
+              :simulationResult="null"
+              :proposalValue="formData.proposalValue"
+              :currentLeader="0"
+              :branchCount="formData.branchCount"
+            />
+          </div>
+        </el-card>
+      </el-col>
+    </el-row>
+    
+    <!-- 会话信息与接入点 (Session Created) -->
+    <el-row :gutter="16" v-if="sessionInfo" class="session-row">
+      <el-col :span="24">
+        <el-alert
+          type="success"
+          :closable="false"
+          class="session-alert"
+        >
+          <template #title>
+            <div class="alert-title">
+              <el-icon :size="20"><SuccessFilled /></el-icon>
+              <span>Session Created Successfully - ID: {{ sessionInfo.sessionId }}</span>
+            </div>
+          </template>
+        </el-alert>
+      </el-col>
+      
+      <!-- 会话详情 -->
+      <el-col :span="16">
+        <el-card shadow="never" class="access-card">
+          <template #header>
+            <div class="section-header">
+              <div class="header-line"></div>
+              <span class="header-title">Access Points</span>
+            </div>
+          </template>
+          
+          <div class="access-content">
+            <el-table 
+              :data="nodeLinks" 
+              stripe
+              class="access-table"
+              :header-cell-style="{ background: '#fafafa', color: '#606266', fontWeight: 600 }"
+            >
+              <el-table-column prop="nodeId" label="Node ID" width="100" align="center">
+                <template #default="{ row }">
+                  <el-tag size="small" type="info">Node {{ row.nodeId }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="url" label="Access URL">
+                <template #default="{ row }">
+                  <code class="url-text">{{ row.url }}</code>
+                </template>
+              </el-table-column>
+              <el-table-column label="Actions" width="140" align="center">
+                <template #default="{ row }">
+                  <el-button size="small" type="primary" @click="copyLink(row.url)" plain>
+                    <el-icon><CopyDocument /></el-icon>
+                    Copy
+                  </el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </el-card>
+      </el-col>
+      
+      <!-- 二维码 -->
+      <el-col :span="8">
+        <el-card shadow="never" class="qr-card">
+          <template #header>
+            <div class="section-header">
+              <div class="header-line"></div>
+              <span class="header-title">Quick Join (QR Code)</span>
+            </div>
+          </template>
+          
+          <div class="qr-content">
+            <div class="qr-container" ref="qrContainer"></div>
+            <p class="qr-tip">Scan to join consensus network</p>
+          </div>
+        </el-card>
+      </el-col>
+    </el-row>
     
     <!-- 动画演示对话框 -->
     <el-dialog
       v-model="demoDialogVisible"
-      title="HotStuff 共识过程动画演示"
+      title="Consensus Process Animation"
       width="90%"
       :close-on-click-modal="false"
       destroy-on-close
     >
       <div class="demo-container">
-        <!-- 控制栏 -->
         <div class="round-selector">
-          <el-tag type="success" size="large">
-            真实会话消息历史
-          </el-tag>
+          <el-tag type="success" size="large">Real Session History</el-tag>
           <el-divider direction="vertical" v-if="simulationRounds.length > 1" />
-          <el-text size="large" v-if="simulationRounds.length > 1">选择轮次：</el-text>
+          <span v-if="simulationRounds.length > 1" class="round-label">Select Round:</span>
           <el-radio-group v-if="simulationRounds.length > 1" v-model="currentRound" @change="onRoundChange">
             <el-radio-button 
               v-for="round in simulationRounds" 
               :key="round.id" 
               :label="round.id"
             >
-              第 {{ round.id }} 轮
+              Round {{ round.id }}
             </el-radio-button>
           </el-radio-group>
-          <el-text type="info" size="small" v-else style="margin-left: 10px;">
-            当前仅有 1 轮共识
-          </el-text>
           <el-button 
             type="primary" 
             @click="playAnimation" 
@@ -220,14 +312,12 @@
             style="margin-left: auto;"
           >
             <el-icon><VideoPlay /></el-icon>
-            重新播放动画
+            Replay
           </el-button>
         </div>
         
-        <!-- 拓扑图和动画 -->
         <div class="demo-content">
           <div class="topology-section">
-            <h3>网络拓扑与消息传递动画</h3>
             <Topology
               v-if="currentSimulation"
               ref="topologyRef"
@@ -242,7 +332,6 @@
           </div>
           
           <div class="table-section">
-            <h3>HotStuff 阶段消息表</h3>
             <HotStuffTable
               v-if="currentSimulation"
               :simulationResult="currentSimulation"
@@ -253,7 +342,7 @@
       </div>
       
       <template #footer>
-        <el-button @click="demoDialogVisible = false">关闭</el-button>
+        <el-button @click="demoDialogVisible = false">Close</el-button>
       </template>
     </el-dialog>
   </div>
@@ -262,7 +351,15 @@
 <script>
 import { ref, reactive, computed, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
-import { VideoPlay } from '@element-plus/icons-vue'
+import { 
+  VideoPlay, 
+  Connection, 
+  WarnTriangleFilled, 
+  Cpu, 
+  Grid, 
+  SuccessFilled,
+  CopyDocument 
+} from '@element-plus/icons-vue'
 import QRCode from 'qrcode'
 import axios from 'axios'
 import Topology from '@/components/Topology.vue'
@@ -272,6 +369,12 @@ export default {
   name: 'HomePage',
   components: {
     VideoPlay,
+    Connection,
+    WarnTriangleFilled,
+    Cpu,
+    Grid,
+    SuccessFilled,
+    CopyDocument,
     Topology,
     HotStuffTable
   },
@@ -281,7 +384,6 @@ export default {
     const creating = ref(false)
     const sessionInfo = ref(null)
     
-    // 演示相关
     const demoDialogVisible = ref(false)
     const simulating = ref(false)
     const simulationRounds = ref([])
@@ -303,15 +405,21 @@ export default {
     
     const rules = {
       nodeCount: [
-        { required: true, message: '请输入总节点数', trigger: 'blur' }
+        { required: true, message: 'Please enter node count', trigger: 'blur' }
       ],
       faultyNodes: [
-        { required: true, message: '请输入故障节点数', trigger: 'blur' }
+        { required: true, message: 'Please enter faulty nodes', trigger: 'blur' }
       ],
       topology: [
-        { required: true, message: '请选择拓扑结构', trigger: 'change' }
+        { required: true, message: 'Please select topology', trigger: 'change' }
       ]
     }
+    
+    const consensusHealth = computed(() => {
+      const deliveryRate = formData.messageDeliveryRate
+      const faultyRatio = formData.faultyNodes / formData.nodeCount
+      return Math.round(deliveryRate * (1 - faultyRatio * 0.5))
+    })
     
     const currentView = computed(() => sessionInfo.value?.currentView ?? 0)
     const currentLeader = computed(() => sessionInfo.value?.leaderId ?? 0)
@@ -323,7 +431,6 @@ export default {
       const robotNodes = sessionInfo.value.config.robotNodes || 0
       const humanNodeCount = sessionInfo.value.config.nodeCount - robotNodes
       
-      // 只显示人类节点的链接，从robotNodes开始编号
       for (let i = 0; i < humanNodeCount; i++) {
         const nodeId = robotNodes + i
         links.push({
@@ -334,136 +441,66 @@ export default {
       return links
     })
     
-    const getTopologyName = (topology) => {
-      const names = {
-        full: '全连接',
-        ring: '环形',
-        star: '星形',
-        tree: '树形'
-      }
-      return names[topology] || topology
-    }
-    
     const createSession = async () => {
       try {
         await formRef.value.validate()
         creating.value = true
         
         const response = await axios.post('/api/sessions', {
-        nodeCount: formData.nodeCount,
-        faultyNodes: formData.faultyNodes,
-        robotNodes: formData.nodeCount - formData.faultyNodes, // 自动计算机器人节点数
-        topology: formData.topology,
-        branchCount: formData.branchCount,
-        proposalValue: formData.proposalValue,
-        proposalContent: formData.proposalContent,
-        maliciousProposer: formData.maliciousProposer,
-        allowTampering: formData.allowTampering,
-        messageDeliveryRate: formData.messageDeliveryRate
-      })
+          nodeCount: formData.nodeCount,
+          faultyNodes: formData.faultyNodes,
+          robotNodes: formData.nodeCount - formData.faultyNodes,
+          topology: formData.topology,
+          branchCount: formData.branchCount,
+          proposalValue: formData.proposalValue,
+          proposalContent: formData.proposalContent,
+          maliciousProposer: formData.maliciousProposer,
+          allowTampering: formData.allowTampering,
+          messageDeliveryRate: formData.messageDeliveryRate
+        })
         
         sessionInfo.value = response.data
-        
-        ElMessage.success('共识会话创建成功！')
+        ElMessage.success('Session created successfully!')
       } catch (error) {
         console.error('Failed to create session:', error)
-        ElMessage.error('创建会话失败，请重试')
+        ElMessage.error('Failed to create session')
       } finally {
         creating.value = false
       }
     }
     
     const generateQRCode = async () => {
-      if (!qrContainer.value || !sessionInfo.value) {
-        console.log('QR container or session info does not exist:', { qrContainer: !!qrContainer.value, sessionInfo: !!sessionInfo.value })
-        return
-      }
+      if (!qrContainer.value || !sessionInfo.value) return
       
       try {
-        // Clear container
         qrContainer.value.innerHTML = ''
         
         const qrData = {
           sessionId: sessionInfo.value.sessionId,
           nodeCount: sessionInfo.value.config.nodeCount,
           joinUrl: `${window.location.origin}/join/${sessionInfo.value.sessionId}`,
-          autoAssign: true,
-          description: 'Scan QR code to auto-assign node'
+          autoAssign: true
         }
         
-        console.log('Generate QR code data:', qrData)
-        
-        // Method 1: Direct use of container
         try {
           await QRCode.toCanvas(qrContainer.value, JSON.stringify(qrData), {
-            width: 200,
-            margin: 2,
-            color: {
-              dark: '#000000',
-              light: '#FFFFFF'
-            }
+            width: 180,
+            margin: 2
           })
-          console.log('QR code generated successfully (method 1)')
           return
         } catch (error1) {
-          console.log('Method 1 failed, trying method 2:', error1)
-        }
-        
-        // Method 2: Create canvas element
-        try {
           const canvas = document.createElement('canvas')
           qrContainer.value.appendChild(canvas)
-          
           await QRCode.toCanvas(canvas, JSON.stringify(qrData), {
-            width: 200,
-            margin: 2,
-            color: {
-              dark: '#000000',
-              light: '#FFFFFF'
-            }
+            width: 180,
+            margin: 2
           })
-          console.log('QR code generated successfully (method 2)')
-          return
-        } catch (error2) {
-          console.log('Method 2 failed, trying method 3:', error2)
         }
-        
-        // Method 3: Use toDataURL
-        try {
-          const dataURL = await QRCode.toDataURL(JSON.stringify(qrData), {
-            width: 200,
-            margin: 2,
-            color: {
-              dark: '#000000',
-              light: '#FFFFFF'
-            }
-          })
-          
-          const img = document.createElement('img')
-          img.src = dataURL
-          img.style.width = '200px'
-          img.style.height = '200px'
-          qrContainer.value.appendChild(img)
-          console.log('QR code generated successfully (method 3)')
-          return
-        } catch (error3) {
-          console.log('Method 3 failed:', error3)
-        }
-        
-        throw new Error('All QR code generation methods failed')
-        
       } catch (error) {
         console.error('Failed to generate QR code:', error)
-        // Show error message and fallback link
         qrContainer.value.innerHTML = `
-          <div style="color: red; padding: 20px; text-align: center;">
-            <div>二维码生成失败</div>
-            <div style="margin-top: 10px; font-size: 12px;">
-              请使用以下链接加入：<br>
-              <a href="${window.location.origin}/join/${sessionInfo.value.sessionId}" target="_blank">
-                ${window.location.origin}/join/${sessionInfo.value.sessionId}
-              </a>
-            </div>
+          <div style="color: #f56c6c; padding: 20px; text-align: center;">
+            QR code generation failed
           </div>
         `
       }
@@ -472,9 +509,9 @@ export default {
     const copyLink = async (url) => {
       try {
         await navigator.clipboard.writeText(url)
-        ElMessage.success('链接已复制到剪贴板')
+        ElMessage.success('Link copied to clipboard')
       } catch (error) {
-        ElMessage.error('复制失败')
+        ElMessage.error('Copy failed')
       }
     }
     
@@ -483,40 +520,30 @@ export default {
       sessionInfo.value = null
     }
     
-    // Watch sessionInfo changes, auto-generate QR code
     watch(sessionInfo, async (newSessionInfo) => {
       if (newSessionInfo) {
-        console.log('Session info updated, preparing to generate QR code')
-        // Wait for DOM update
         await new Promise(resolve => setTimeout(resolve, 100))
         await generateQRCode()
       }
     })
     
-    // 演示相关方法
     const showDemo = async () => {
       try {
         simulating.value = true
         
-        // 检查是否已创建会话
         if (!sessionInfo.value) {
-          ElMessage.error('请先创建共识会话！')
+          ElMessage.error('Please create a session first!')
           return
         }
         
         simulationRounds.value = []
         
-        // 1. 先获取轮次列表
         const roundsResponse = await axios.get(`/api/sessions/${sessionInfo.value.sessionId}/history`)
         const rounds = roundsResponse.data.rounds || [1]
         
-        console.log('可用的轮次:', rounds)
-        
-        // 2. 获取所有轮次的数据
         for (const roundNum of rounds) {
           const response = await axios.get(`/api/sessions/${sessionInfo.value.sessionId}/history?round=${roundNum}`)
           const roundData = response.data || {}
-          // 确保每一轮的历史数据中包含 leaderId（后端已返回，如无则按公式回退）
           const leaderId =
             typeof roundData.leaderId === 'number'
               ? roundData.leaderId
@@ -528,26 +555,19 @@ export default {
           })
         }
         
-        // 默认显示第一轮
         currentRound.value = rounds[0]
         currentSimulation.value = simulationRounds.value[0].data
         
-        // 打开对话框
         demoDialogVisible.value = true
         
-        // 等待DOM更新后播放动画
         await nextTick()
         await new Promise(resolve => setTimeout(resolve, 300))
         playAnimation()
         
-        ElMessage.success(`已加载 ${rounds.length} 轮共识历史`)
+        ElMessage.success(`Loaded ${rounds.length} consensus rounds`)
       } catch (error) {
         console.error('Failed to get session history:', error)
-        if (error.response && error.response.status === 404) {
-          ElMessage.error('会话不存在或已过期，请重新创建会话')
-        } else {
-          ElMessage.error('获取会话历史失败，请稍后重试')
-        }
+        ElMessage.error('Failed to load session history')
       } finally {
         simulating.value = false
       }
@@ -557,7 +577,6 @@ export default {
       const round = simulationRounds.value.find(r => r.id === roundId)
       if (round) {
         currentSimulation.value = round.data
-        // 自动播放新轮次的动画
         nextTick(() => {
           playAnimation()
         })
@@ -565,7 +584,6 @@ export default {
     }
     
     const demoLeader = computed(() => {
-      // 动画演示时优先使用当前轮次历史数据中的 leaderId，若无则退回当前会话的 Leader
       if (currentSimulation.value && typeof currentSimulation.value.leaderId === 'number') {
         return currentSimulation.value.leaderId
       }
@@ -585,12 +603,11 @@ export default {
       sessionInfo,
       formData,
       rules,
+      consensusHealth,
       nodeLinks,
-      getTopologyName,
       createSession,
       copyLink,
       resetForm,
-      // 演示相关
       demoDialogVisible,
       simulating,
       simulationRounds,
@@ -607,153 +624,270 @@ export default {
 </script>
 
 <style scoped>
-.home-page {
-  min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+.dashboard-page {
+  padding: 0;
+  min-height: calc(100vh - 64px);
 }
 
-.header {
-  background: rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.2);
-  color: white;
-  text-align: center;
-  padding: 20px;
+/* ========== 统计卡片 ========== */
+.metrics-row {
+  margin-bottom: 16px;
 }
 
-.header h1 {
-  margin: 0;
-  font-size: 2.5rem;
-  font-weight: 300;
-  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
-}
-
-.header p {
-  margin: 10px 0 0 0;
-  opacity: 0.9;
-  font-size: 1.1rem;
-}
-
-.main-content {
-  padding: 40px;
-}
-
-.config-card, .qr-card, .welcome-card {
-  height: 100%;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-  border-radius: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-}
-
-.card-header {
-  font-size: 1.2rem;
-  font-weight: 600;
-  color: #2c3e50;
-}
-
-.config-form {
-  padding: 20px 0;
-}
-
-.form-tip {
-  margin-left: 10px;
-  color: #909399;
-  font-size: 0.9rem;
-}
-
-.session-info {
-  padding: 20px 0;
-}
-
-.qr-section {
-  margin: 30px 0;
-  text-align: center;
-}
-
-.qr-section h3 {
-  margin-bottom: 20px;
-  color: #2c3e50;
-}
-
-.qr-container {
-  display: inline-block;
-  padding: 20px;
-  background: white;
+.metric-card {
   border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  border: 1px solid #e8e8e8;
+  transition: all 0.3s;
 }
 
-.qr-tip {
-  margin-top: 15px;
-  color: #606266;
-  font-size: 0.9rem;
+.metric-card:hover {
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+  transform: translateY(-2px);
 }
 
-.node-links {
-  margin-top: 30px;
+.metric-content {
+  display: flex;
+  align-items: center;
+  gap: 16px;
 }
 
-.node-links h3 {
-  margin-bottom: 15px;
-  color: #2c3e50;
-}
-
-.welcome-content {
-  text-align: center;
-  padding: 60px 20px;
-  color: #606266;
-}
-
-.welcome-content h2 {
-  margin: 20px 0;
-  color: #2c3e50;
-}
-
-.welcome-content p {
-  margin: 10px 0;
-  line-height: 1.6;
-}
-
-/* 演示对话框样式 */
-.demo-container {
-  padding: 20px;
-}
-
-.round-selector {
-  margin-bottom: 30px;
-  padding: 20px;
-  background: #f5f7fa;
+.metric-icon {
+  width: 56px;
+  height: 56px;
   border-radius: 8px;
   display: flex;
   align-items: center;
-  gap: 20px;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.primary-bg {
+  background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+  color: #1976d2;
+}
+
+.danger-bg {
+  background: linear-gradient(135deg, #ffebee 0%, #ffcdd2 100%);
+  color: #d32f2f;
+}
+
+.success-bg {
+  background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%);
+  color: #388e3c;
+}
+
+.warning-bg {
+  background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%);
+  color: #f57c00;
+}
+
+.metric-info {
+  flex: 1;
+}
+
+.metric-label {
+  font-size: 14px;
+  color: #606266;
+  margin-bottom: 4px;
+}
+
+.metric-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: #303133;
+  line-height: 1;
+}
+
+/* ========== 主内容区域 ========== */
+.main-row {
+  margin-bottom: 16px;
+}
+
+.config-card,
+.preview-card,
+.access-card,
+.qr-card {
+  border-radius: 8px;
+  border: 1px solid #e8e8e8;
+  min-height: 600px;
+}
+
+/* Section Header (Vben 风格) */
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.header-line {
+  width: 3px;
+  height: 16px;
+  background: #1890ff;
+  border-radius: 2px;
+}
+
+.header-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+}
+
+/* ========== 配置表单 ========== */
+.genesis-form {
+  padding: 8px 0;
+}
+
+.genesis-form :deep(.el-form-item) {
+  margin-bottom: 20px;
+}
+
+.genesis-form :deep(.el-form-item__label) {
+  font-size: 13px;
+  color: #606266;
+  font-weight: 500;
+}
+
+.full-width {
+  width: 100%;
+}
+
+.action-buttons {
+  margin-top: 24px;
+  margin-bottom: 0;
+}
+
+.action-buttons :deep(.el-form-item__content) {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ========== 拓扑预览 ========== */
+.topology-preview {
+  min-height: 500px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ========== 会话区域 ========== */
+.session-row {
+  margin-bottom: 16px;
+}
+
+.session-alert {
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.alert-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* ========== 接入点表格 (Etherscan 风格) ========== */
+.access-content {
+  padding: 0;
+}
+
+.access-table {
+  font-size: 13px;
+}
+
+.access-table :deep(th) {
+  padding: 12px 0;
+}
+
+.access-table :deep(td) {
+  padding: 10px 0;
+}
+
+.url-text {
+  font-family: 'JetBrains Mono', 'Roboto Mono', 'Courier New', monospace;
+  font-size: 12px;
+  background: #f5f5f5;
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: #1890ff;
+}
+
+/* ========== 二维码 ========== */
+.qr-card {
+  min-height: auto;
+}
+
+.qr-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20px 0;
+}
+
+.qr-container {
+  padding: 16px;
+  background: #fff;
+  border: 2px solid #e8e8e8;
+  border-radius: 8px;
+  display: inline-block;
+}
+
+.qr-tip {
+  margin-top: 16px;
+  font-size: 13px;
+  color: #909399;
+  text-align: center;
+}
+
+/* ========== 动画演示对话框 ========== */
+.demo-container {
+  padding: 16px;
+}
+
+.round-selector {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+  background: #fafafa;
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+
+.round-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: #606266;
 }
 
 .demo-content {
   display: flex;
   flex-direction: column;
-  gap: 40px;
+  gap: 24px;
 }
 
 .topology-section,
 .table-section {
-  background: white;
-  padding: 20px;
+  background: #fff;
   border-radius: 8px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
 }
 
-.topology-section h3,
-.table-section h3 {
-  margin: 0 0 20px 0;
-  color: #2c3e50;
-  font-size: 1.3rem;
-  text-align: center;
+/* ========== 响应式 ========== */
+@media (max-width: 1200px) {
+  .metric-value {
+    font-size: 20px;
+  }
+  
+  .metric-icon {
+    width: 48px;
+    height: 48px;
+  }
 }
 
-.topology-section {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
+@media (max-width: 768px) {
+  .metrics-row .el-col {
+    margin-bottom: 12px;
+  }
 }
-</style> 
+</style>

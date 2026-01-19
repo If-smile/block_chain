@@ -1,325 +1,283 @@
 <template>
-  <div class="node-page">
-    <el-container>
-      <el-header class="header">
-        <div class="header-content">
-          <div class="node-info">
-            <h2>参与者 {{ nodeId }}</h2>
-            <el-tag :type="connectionStatus === 'connected' ? 'success' : 'danger'">
-              {{ connectionStatus === 'connected' ? '已连接' : '未连接' }}
-            </el-tag>
-            <el-tag type="danger" effect="dark">🦹 拜占庭节点（人类玩家）</el-tag>
+  <div class="terminal-page">
+    <!-- Terminal Header -->
+    <div class="terminal-header">
+      <div class="header-left">
+        <el-tag 
+          :type="isLeader ? 'warning' : 'primary'" 
+          effect="dark" 
+          size="large"
+          class="role-badge"
+        >
+          <el-icon><User /></el-icon>
+          {{ isLeader ? 'LEADER' : 'REPLICA' }} - Node {{ nodeId }}
+        </el-tag>
+        
+        <el-tag 
+          :type="connectionStatus === 'connected' ? 'success' : 'danger'"
+          effect="dark"
+          size="large"
+        >
+          <el-icon>
+            <Connection v-if="connectionStatus === 'connected'" />
+            <Close v-else />
+          </el-icon>
+          {{ connectionStatus === 'connected' ? 'ONLINE' : 'OFFLINE' }}
+        </el-tag>
+        
+        <el-tag type="info" effect="dark" size="large">
+          <el-icon><View /></el-icon>
+          VIEW {{ currentView }}
+        </el-tag>
+      </div>
+      
+      <div class="header-right">
+        <el-button 
+          size="small" 
+          type="danger" 
+          @click="leaveSession"
+          :icon="SwitchButton"
+        >
+          Exit
+        </el-button>
+      </div>
+    </div>
+    
+    <!-- Main Content Area -->
+    <el-row :gutter="0" class="terminal-main">
+      <!-- Left: Control Panel (40%) -->
+      <el-col :span="10">
+        <div class="control-panel">
+          <div class="panel-header">
+            <div class="header-line"></div>
+            <span class="panel-title">CONTROL PANEL</span>
           </div>
-          <div class="session-info">
-            <span>会话: {{ sessionId }}</span>
-            <el-tag type="primary">当前视图: {{ currentView }}</el-tag>
-            <el-button size="small" @click="leaveSession" type="danger">离开会话</el-button>
+          
+          <div class="panel-content">
+            <!-- Leader: Proposal Box -->
+            <div v-if="isLeader" class="proposal-section">
+              <div class="section-title">
+                <el-icon><Edit /></el-icon>
+                <span>Send Proposal</span>
+              </div>
+              
+              <div class="proposal-input-group">
+                <el-input
+                  v-model="proposalInput"
+                  placeholder="Enter proposal value..."
+                  class="proposal-input"
+                  size="large"
+                >
+                  <template #suffix>
+                    <el-button
+                      :icon="Promotion"
+                      circle
+                      type="primary"
+                      @click="sendProposal"
+                      :disabled="!proposalInput"
+                    />
+                  </template>
+                </el-input>
+              </div>
+              
+              <div class="proposal-quick-actions">
+                <el-button 
+                  @click="proposalInput = sessionConfig.proposalValue?.toString() || '0'"
+                  size="small"
+                  plain
+                >
+                  Use Default ({{ sessionConfig.proposalValue }})
+                </el-button>
+              </div>
+            </div>
+            
+            <!-- Replica: Progress Ring -->
+            <div v-else class="progress-section">
+              <div class="section-title">
+                <el-icon><Timer /></el-icon>
+                <span>Consensus Progress</span>
+              </div>
+              
+              <div class="progress-ring-container">
+                <el-progress
+                  type="circle"
+                  :percentage="getPhasePercentage()"
+                  :width="180"
+                  :stroke-width="12"
+                  :color="progressColors"
+                >
+                  <template #default="{ percentage }">
+                    <div class="progress-content">
+                      <div class="progress-value">{{ percentage }}%</div>
+                      <div class="progress-phase">{{ getPhaseShortName(currentPhase) }}</div>
+                    </div>
+                  </template>
+                </el-progress>
+              </div>
+              
+              <div class="phase-timeline">
+                <el-steps :active="phaseStep" finish-status="success" align-center>
+                  <el-step title="Prepare" icon="DocumentChecked" />
+                  <el-step title="Pre-Commit" icon="Document" />
+                  <el-step title="Commit" icon="DocumentCopy" />
+                  <el-step title="Decide" icon="Select" />
+                </el-steps>
+              </div>
+            </div>
+            
+            <!-- Action Selection -->
+            <div class="action-section">
+              <el-divider content-position="left">
+                <span class="divider-text">Node Actions</span>
+              </el-divider>
+              
+              <div v-if="waitingForNextRound" class="waiting-box">
+                <el-icon class="waiting-icon" :size="40"><Loading /></el-icon>
+                <p>Waiting for next consensus round...</p>
+              </div>
+              
+              <div v-else class="action-buttons">
+                <el-button
+                  :type="hasChosenAction && isNormalMode ? 'success' : 'default'"
+                  @click="chooseNormalConsensus"
+                  :disabled="hasChosenAction"
+                  :icon="CircleCheck"
+                  size="large"
+                  class="action-btn"
+                >
+                  {{ hasChosenAction && isNormalMode ? '✓ Normal Mode' : 'Normal Consensus' }}
+                </el-button>
+                
+                <el-button
+                  :type="hasChosenAction && !isNormalMode ? 'danger' : 'default'"
+                  @click="chooseByzantineAttack"
+                  :disabled="hasChosenAction"
+                  :icon="WarnTriangleFilled"
+                  size="large"
+                  class="action-btn"
+                >
+                  {{ hasChosenAction && !isNormalMode ? '✓ Byzantine Mode' : 'Byzantine Attack' }}
+                </el-button>
+              </div>
+              
+              <!-- Byzantine Attack Controls -->
+              <div v-if="hasChosenAction && !isNormalMode" class="byzantine-controls">
+                <el-alert
+                  title="Byzantine Mode Active"
+                  type="warning"
+                  :closable="false"
+                  show-icon
+                  class="mode-alert"
+                />
+                
+                <el-button
+                  type="danger"
+                  @click="sendErrorMessage"
+                  :icon="Warning"
+                  size="large"
+                  class="error-btn"
+                >
+                  Send Error Message
+                </el-button>
+              </div>
+              
+              <div v-else-if="hasChosenAction && isNormalMode" class="normal-mode-info">
+                <el-alert
+                  title="Normal Mode Active"
+                  description="Robot is handling consensus protocol for you."
+                  type="success"
+                  :closable="false"
+                  show-icon
+                />
+              </div>
+            </div>
+            
+            <!-- Consensus Status -->
+            <div class="status-section">
+              <el-divider content-position="left">
+                <span class="divider-text">Network Status</span>
+              </el-divider>
+              
+              <el-descriptions :column="1" size="small" border class="status-table">
+                <el-descriptions-item label="Current Leader">
+                  Node {{ currentLeaderId }}
+                </el-descriptions-item>
+                <el-descriptions-item label="Current Phase">
+                  {{ getPhaseDisplayName(currentPhase) }}
+                </el-descriptions-item>
+                <el-descriptions-item label="Accepted Value">
+                  {{ getAcceptedContentDisplay() }}
+                </el-descriptions-item>
+                <el-descriptions-item label="Network Reliability">
+                  {{ sessionConfig.messageDeliveryRate ?? '—' }}%
+                </el-descriptions-item>
+              </el-descriptions>
+            </div>
           </div>
         </div>
-      </el-header>
+      </el-col>
       
-      <el-main class="main-content">
-        <el-row :gutter="20">
-          <!-- Left: Consensus Progress -->
-          <el-col :span="6">
-            <!-- Advanced Options Toggle -->
-            <div style="margin-bottom: 15px;">
+      <!-- Right: Audit Log (60%) -->
+      <el-col :span="14">
+        <div class="audit-log">
+          <div class="log-header">
+            <div class="header-line"></div>
+            <span class="log-title">AUDIT LOG</span>
+            <div class="log-actions">
               <el-button 
-                @click="showAdvancedOptions = !showAdvancedOptions" 
-                :type="showAdvancedOptions ? 'primary' : 'info'"
-                size="default"
-                style="width: 100%;"
+                size="small" 
+                :icon="Delete"
+                @click="clearLogs"
+                text
               >
-                {{ showAdvancedOptions ? '隐藏高级选项' : '显示高级选项' }}
+                Clear
               </el-button>
             </div>
-            
-            <el-card class="progress-card">
-              <template #header>
-                <div class="card-header">
-                  <span>共识进度</span>
-                  <el-tag type="primary" size="large" effect="dark">当前视图: {{ currentView }}</el-tag>
-                </div>
-              </template>
-              
-              <div class="consensus-progress">
-                <!-- Consensus Progress Bar -->
-                <div class="phase-progress">
-                  <el-progress 
-                    :percentage="getPhasePercentage()" 
-                    :status="getPhaseStatus()"
-                    :stroke-width="8"
-                  />
-                  <div class="phase-steps">
-                    <el-steps :active="phaseStep" finish-status="success" simple>
-                      <el-step title="Prepare" description="准备阶段" />
-                      <el-step title="Pre-Commit" description="预提交阶段" />
-                      <el-step title="Commit" description="提交阶段" />
-                      <el-step title="Decide" description="决定阶段" />
-                    </el-steps>
-                  </div>
-                </div>
-                
-                <!-- Current Status -->
-                <div class="current-status">
-                  <h4>当前状态</h4>
-                  <el-descriptions :column="1" border size="small">
-                    <el-descriptions-item label="当前视图">{{ currentView }}</el-descriptions-item>
-                    <el-descriptions-item label="当前 Leader">节点 {{ currentLeaderId }}</el-descriptions-item>
-                    <el-descriptions-item label="当前阶段">{{ getPhaseDisplayName(currentPhase) }}</el-descriptions-item>
-                    <el-descriptions-item label="已接受内容">{{ getAcceptedContentDisplay() }}</el-descriptions-item>
-                    <el-descriptions-item label="网络可靠性">{{ sessionConfig.messageDeliveryRate ?? '未设置' }}%</el-descriptions-item>
-                  </el-descriptions>
-                </div>
-                
-                <!-- Human Node Actions -->
-                <div class="human-node-actions">
-                  <h4>操作选择</h4>
-                  
-                  <!-- 等待下一轮共识 -->
-                  <div v-if="waitingForNextRound">
-                    <el-alert
-                      title="等待下一轮共识开始"
-                      description="您在当前轮次进入系统，将在下一轮共识开始时参与。请耐心等待..."
-                      type="info"
-                      :closable="false"
-                      show-icon
-                    />
-                  </div>
-                  
-                  <!-- 可以选择操作 -->
-                  <div v-else>
-                    <div class="action-buttons" style="display: flex; flex-direction: column; align-items: stretch;">
-                      <el-button 
-                        type="success" 
-                        @click="chooseNormalConsensus" 
-                        :disabled="hasChosenAction"
-                        size="default"
-                        style="width: 100%; margin-bottom: 15px; padding: 8px 20px; border-width: 1px; box-sizing: border-box;"
-                      >
-                        {{ hasChosenAction && isNormalMode ? '✓ 已选择正常共识（机器人代理）' : '正常共识' }}
-                      </el-button>
-                      <el-button 
-                        type="danger" 
-                        @click="chooseByzantineAttack" 
-                        :disabled="hasChosenAction"
-                        size="default"
-                        style="width: 100%; padding: 8px 20px; border-width: 1px; box-sizing: border-box;"
-                      >
-                        {{ hasChosenAction && !isNormalMode ? '✓ 已选择拜占庭攻击' : '拜占庭攻击' }}
-                      </el-button>
-                    </div>
-                    <div class="action-tip" style="margin-top: 10px;">
-                      <el-alert
-                        v-if="!hasChosenAction"
-                        title="请选择本轮的操作方式"
-                        description="选择正常共识后，机器人将代替您执行正确的PBFT流程；选择拜占庭攻击后，您可以手动发送错误信息。"
-                        type="info"
-                        :closable="false"
-                      />
-                      <el-alert
-                        v-if="hasChosenAction && isNormalMode"
-                        title="机器人代理模式"
-                        description="机器人正在代替您执行正确的PBFT流程，您无需操作。"
-                        type="success"
-                        :closable="false"
-                      />
-                      <el-alert
-                        v-if="hasChosenAction && !isNormalMode"
-                        title="拜占庭攻击模式"
-                        description="您可以在适当时机发送错误信息来干扰共识。"
-                        type="warning"
-                        :closable="false"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-
-
-                <!-- Byzantine Attack Control Area (only show when Byzantine mode chosen) -->
-                <div class="attack-control" v-if="hasChosenAction && !isNormalMode">
-                  <el-divider content-position="left">
-                    <span style="color: #f56c6c; font-weight: bold;">🦹 拜占庭攻击操作</span>
-                  </el-divider>
-                  
-                  <div class="simple-attack-control">
-                    <el-button 
-                      type="danger" 
-                      @click="sendErrorMessage" 
-                      style="width: 100%"
-                      size="large"
-                    >
-                      发送错误信息
-                    </el-button>
-                    <div class="attack-tip" style="margin-top: 10px;">
-                      <el-tag type="info" size="small">点击按钮发送与当前共识值相反的错误信息</el-tag>
-                    </div>
-                  </div>
-                </div>
-                
-                <!-- Consensus Result Display -->
-                <div class="consensus-result-control" style="margin-top: 20px; border-top: 1px solid #e4e7ed; padding-top: 15px;">
-                  <el-button 
-                    type="primary" 
-                    @click="showConsensusResult" 
-                    size="large"
-                    style="width: 100%"
-                  >
-                    显示共识结果
-                  </el-button>
-                </div>
-              </div>
-            </el-card>
-          </el-col>
+          </div>
           
-          <!-- Middle: Received Messages -->
-          <el-col :span="6" v-if="showAdvancedOptions">
-            <el-card class="messages-card">
-              <template #header>
-                <div class="card-header">
-                  <span>收到的消息</span>
-                  <div>
-                    <el-button size="small" @click="exportMessages">导出</el-button>
-                    <el-button size="small" @click="clearMessages">清除</el-button>
-                  </div>
-                </div>
-              </template>
-              
-              <div class="messages-container">
-                <div class="messages-header">
-                  <span>消息数量: {{ receivedMessages.length }}</span>
-                </div>
-                
-                <div class="message-list">
-                  <div 
-                    v-for="msg in receivedMessages.slice(0, 8)" 
-                    :key="msg.id"
-                    class="message-item-compact"
-                  >
-                    <div class="message-header-compact">
-                      <span class="message-from">来自: 参与者{{ msg.from }}</span>
-                      <span class="message-time">{{ formatTime(msg.timestamp) }}</span>
-                    </div>
-                    <div class="message-content-compact">
-                      <span class="message-type">{{ getMessageTypeName(msg.type) }}</span>
-                      <span class="message-value" v-if="msg.value !== null">
-                        内容: {{ msg.value === -1 ? '拒绝' : (msg.value === 0 ? '选项A' : '选项B') }}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-                
-                <div v-if="receivedMessages.length === 0" class="no-messages">
-                  <el-empty description="暂无消息" :image-size="60" />
-                </div>
-              </div>
-            </el-card>
-          </el-col>
-          
-          <!-- Right: Topology and Consensus Results -->
-          <el-col :span="12" v-if="showAdvancedOptions">
-            <!-- Topology -->
-            <el-card class="topology-card">
-              <template #header>
-                <div class="card-header">
-                  <span>网络拓扑图</span>
-                  <el-button size="small" @click="refreshTopology">刷新</el-button>
-                </div>
-              </template>
-              
-              <div class="dynamic-topology">
-                <div class="topology-info">
-                  <p><strong>网络类型:</strong> {{ getTopologyName(sessionConfig.topology) }}</p>
-                  <p><strong>总参与者:</strong> {{ sessionConfig.nodeCount }}</p>
-                  <p><strong>活跃连接:</strong> {{ getActiveConnections() }}</p>
-                </div>
-                
-                <!-- Topology Container -->
-                <div class="topology-container">
-                  <!-- Connection Lines -->
-                  <svg class="connection-lines" :width="topologyWidth" :height="topologyHeight">
-                    <line 
-                      v-for="connection in topologyConnections" 
-                      :key="`${connection.from}-${connection.to}`"
-                      :x1="connection.x1" 
-                      :y1="connection.y1" 
-                      :x2="connection.x2" 
-                      :y2="connection.y2"
-                      :class="connection.active ? 'active-connection' : 'inactive-connection'"
-                    />
-                  </svg>
-                  
-                  <!-- Nodes -->
-                  <div 
-                    v-for="i in sessionConfig.nodeCount" 
-                    :key="i-1"
-                    class="topology-node"
-                    :class="{
-                      'current-node': (i-1) === nodeId,
-                      'proposer': (i-1) === 0,
-                      'visible-node': isNodeVisible(i-1),
-                      'invisible-node': !isNodeVisible(i-1),
-                      'has-messages': hasNodeMessages(i-1),
-                      'active': isNodeActive(i-1)
-                    }"
-                    :style="{
-                      left: getNodeX(i-1) + 'px',
-                      top: getNodeY(i-1) + 'px'
-                    }"
-                    @click="showNodeDetails(i-1)"
-                  >
-                    <div class="node-number">{{ i-1 }}</div>
-                    <div class="node-status-indicator" v-if="isNodeActive(i-1)"></div>
-                    <div class="message-count" v-if="getNodeMessageCount(i-1) > 0">
-                      {{ getNodeMessageCount(i-1) }}
-                    </div>
-                  </div>
-                </div>
-                
-              </div>
-            </el-card>
-            
-          </el-col>
-        </el-row>
-      </el-main>
-    </el-container>
-    
-    <!-- Node Details Dialog -->
-    <el-dialog v-model="nodeDetailsVisible" title="参与者详情" width="500px">
-      <div v-if="selectedNode !== null">
-        <el-descriptions :column="1" border>
-          <el-descriptions-item label="参与者ID">{{ selectedNode }}</el-descriptions-item>
-          <el-descriptions-item label="连接状态">
-            <el-tag :type="connectedNodes.includes(selectedNode) ? 'success' : 'danger'">
-              {{ connectedNodes.includes(selectedNode) ? '已连接' : '未连接' }}
-            </el-tag>
-          </el-descriptions-item>
-          <el-descriptions-item label="角色">{{ selectedNode === 0 ? '提议者' : '验证者' }}</el-descriptions-item>
-          <el-descriptions-item label="消息数量">{{ getNodeMessageCount(selectedNode) }}</el-descriptions-item>
-        </el-descriptions>
-        
-        <div class="node-messages" style="margin-top: 20px;">
-          <h4>来自此参与者的消息</h4>
-          <div v-for="msg in getNodeMessages(selectedNode)" :key="msg.id" class="message-item">
-            <div class="message-header">
-              <span>{{ getMessageTypeName(msg.type) }}</span>
-              <span>{{ formatTime(msg.timestamp) }}</span>
+          <div class="log-content" ref="logContainer" v-auto-animate>
+            <div 
+              v-for="log in auditLogs" 
+              :key="log.id"
+              class="log-entry"
+              :class="`log-${log.type}`"
+            >
+              <span class="log-time">[{{ log.time }}]</span>
+              <span class="log-type">[{{ log.typeLabel }}]</span>
+              <span class="log-message">{{ log.message }}</span>
             </div>
-            <div class="message-content">
-              内容: {{ msg.value === -1 ? '拒绝' : (msg.value !== null ? (msg.value === 0 ? (sessionConfig.proposalContent || '选项A') : (sessionConfig.proposalContent || '选项B')) : '无') }}
+            
+            <div v-if="auditLogs.length === 0" class="log-empty">
+              <el-icon :size="40"><Document /></el-icon>
+              <p>No logs yet. Waiting for network activity...</p>
             </div>
           </div>
         </div>
-      </div>
-    </el-dialog>
+      </el-col>
+    </el-row>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  User,
+  Connection,
+  Close,
+  View,
+  SwitchButton,
+  Edit,
+  Promotion,
+  Timer,
+  Loading,
+  CircleCheck,
+  WarnTriangleFilled,
+  Warning,
+  Delete,
+  Document
+} from '@element-plus/icons-vue'
 import io from 'socket.io-client'
 
 const route = useRoute()
@@ -329,7 +287,7 @@ const router = useRouter()
 const sessionId = route.params.sessionId
 const nodeId = parseInt(route.params.nodeId)
 
-// Reactive data
+// Reactive state
 const socket = ref(null)
 const connectionStatus = ref('connecting')
 const sessionConfig = ref({
@@ -338,88 +296,88 @@ const sessionConfig = ref({
   proposalValue: 0,
   proposalContent: '',
   faultyNodes: 1,
-  maliciousProposer: false,
-  allowTampering: false,
   messageDeliveryRate: 100
 })
 const connectedNodes = ref([])
-const currentPhase = ref('pre-prepare')
+const currentPhase = ref('prepare')
 const phaseStep = ref(0)
-const currentRound = ref(1) // 兼容旧逻辑
 const currentView = ref(0)
 const currentLeaderId = ref(0)
 const acceptedValue = ref(null)
 const receivedMessages = ref([])
 
-// Human node action choice
+// Action state
 const hasChosenAction = ref(false)
 const isNormalMode = ref(false)
-const waitingForNextRound = ref(true)  // 初始时等待下一轮共识
-const showAdvancedOptions = ref(false)  // 控制高级选项显示
-const nodeDetailsVisible = ref(false)
-const selectedNode = ref(null)
+const waitingForNextRound = ref(true)
 
-// Topology related
-const topologyWidth = ref(500)
-const topologyHeight = ref(400)
-const topologyConnections = ref([])
+// UI state
+const proposalInput = ref('')
+const logContainer = ref(null)
+const auditLogs = ref([])
 
+// Computed
+const isLeader = computed(() => nodeId === currentLeaderId.value)
 
-// Message sending form (custom message functionality removed)
-const messageForm = reactive({
-  type: 'prepare',
-  value: 0,
-  target: 'all'
-})
-
+const progressColors = [
+  { color: '#f56c6c', percentage: 25 },
+  { color: '#e6a23c', percentage: 50 },
+  { color: '#5cb87a', percentage: 75 },
+  { color: '#1989fa', percentage: 100 }
+]
 
 // Methods
+const addLog = (type, message) => {
+  const log = {
+    id: Date.now() + Math.random(),
+    time: new Date().toLocaleTimeString(),
+    type: type,
+    typeLabel: type.toUpperCase(),
+    message: message
+  }
+  auditLogs.value.unshift(log)
+  
+  // Limit logs to 100 entries
+  if (auditLogs.value.length > 100) {
+    auditLogs.value = auditLogs.value.slice(0, 100)
+  }
+  
+  // Auto-scroll to bottom (top in this case since we prepend)
+  nextTick(() => {
+    if (logContainer.value) {
+      logContainer.value.scrollTop = 0
+    }
+  })
+}
+
 const connectToServer = () => {
   socket.value = io(window.location.origin, {
-    query: {
-      sessionId,
-      nodeId
-    }
+    query: { sessionId, nodeId }
   })
 
   socket.value.on('connect', () => {
     connectionStatus.value = 'connected'
-    ElMessage.success('连接成功')
+    addLog('info', `Node ${nodeId} connected to session ${sessionId}`)
+    ElMessage.success('Connected to server')
   })
 
   socket.value.on('disconnect', () => {
     connectionStatus.value = 'disconnected'
-    ElMessage.warning('连接断开')
+    addLog('error', 'Disconnected from server')
+    ElMessage.warning('Connection lost')
   })
 
   socket.value.on('session_config', (config) => {
-    console.log('Received session config:', config)
-    console.log('Proposal content check:', {
-      proposalContent: config.proposalContent,
-      hasProposalContent: config.proposalContent && config.proposalContent.trim(),
-      proposalValue: config.proposalValue
-    })
-    
-    // Merge configuration, ensure all fields exist
-    sessionConfig.value = {
-      ...sessionConfig.value,
-      ...config
-    }
-    console.log('Merged configuration:', sessionConfig.value)
-    console.log('Final proposalContent:', sessionConfig.value.proposalContent)
-    
-    // Set accepted value to proposal value
+    sessionConfig.value = { ...sessionConfig.value, ...config }
     acceptedValue.value = config.proposalValue
-    console.log('Set acceptedValue:', acceptedValue.value)
-    
-    refreshTopology()
+    addLog('info', `Session configuration received: ${config.nodeCount} nodes`)
   })
 
   socket.value.on('node_connected', (data) => {
     if (!connectedNodes.value.includes(data.nodeId)) {
       connectedNodes.value.push(data.nodeId)
     }
-    refreshTopology()
+    addLog('info', `Node ${data.nodeId} joined the network`)
   })
 
   socket.value.on('node_disconnected', (data) => {
@@ -427,37 +385,27 @@ const connectToServer = () => {
     if (index > -1) {
       connectedNodes.value.splice(index, 1)
     }
-    refreshTopology()
+    addLog('warn', `Node ${data.nodeId} left the network`)
   })
 
   socket.value.on('phase_update', (data) => {
     currentPhase.value = data.phase
     phaseStep.value = data.step
-    if (data.view !== undefined) {
-      currentView.value = data.view
-    }
-    if (data.leader !== undefined) {
-      currentLeaderId.value = data.leader
-    }
-    refreshTopology()
+    if (data.view !== undefined) currentView.value = data.view
+    if (data.leader !== undefined) currentLeaderId.value = data.leader
+    addLog('info', `Phase updated: ${data.phase.toUpperCase()} (Step ${data.step}/4)`)
   })
-  
+
   socket.value.on('new_round', (data) => {
-    console.log('进入新一轮共识:', data)
-    currentRound.value = data.round
-    if (data.view !== undefined) {
-      currentView.value = data.view
-    }
+    currentView.value = data.view !== undefined ? data.view : currentView.value
     currentPhase.value = data.phase
     phaseStep.value = data.step
-    receivedMessages.value = []  // 清空消息列表
-    
-    // 重置操作选择
+    receivedMessages.value = []
     hasChosenAction.value = false
     isNormalMode.value = false
-    waitingForNextRound.value = false  // 可以参与共识了
-    
-    ElMessage.info(`开始第${data.round}轮共识`)
+    waitingForNextRound.value = false
+    addLog('info', `🔄 New consensus round started (View ${data.view || currentView.value})`)
+    ElMessage.info(`Round ${data.round || currentView.value} started`)
   })
 
   socket.value.on('message_received', (message) => {
@@ -467,55 +415,41 @@ const connectToServer = () => {
       timestamp: new Date()
     })
     
-    // If it's a pre-prepare message, set the accepted value
     if (message.type === 'pre_prepare' && message.from === 0) {
       acceptedValue.value = message.value
     }
     
-    refreshTopology()
+    addLog('info', `📩 Message from Node ${message.from}: ${getMessageTypeName(message.type)} (value: ${message.value})`)
   })
 
   socket.value.on('consensus_result', (result) => {
-    console.log('收到共识结果:', result)
-    console.log('共识结果状态:', result.status)
-    console.log('共识结果描述:', result.description)
+    const logType = result.status === '共识成功' ? 'info' : 'error'
+    addLog(logType, `🎯 Consensus Result: ${result.status} - ${result.description}`)
     
-    // 根据共识结果显示不同的消息
     if (result.status === '共识成功') {
-      console.log('显示成功消息')
-      ElMessage.success(`共识成功: ${result.description}`)
-    } else if (result.status === '共识失败') {
-      console.log('显示失败消息')
-      ElMessage.error(`共识失败: ${result.description}`)
-    } else if (result.status === '拒绝提议') {
-      console.log('显示拒绝消息')
-      ElMessage.warning(`拒绝提议: ${result.description}`)
-    } else if (result.status === '无诚实节点') {
-      console.log('显示无诚实节点消息')
-      ElMessage.error(`无诚实节点: ${result.description}`)
+      ElMessage.success(`Consensus: ${result.description}`)
     } else {
-      console.log('显示其他消息')
-      ElMessage.info(`共识结果: ${result.status} - ${result.description}`)
+      ElMessage.error(`Consensus Failed: ${result.description}`)
     }
   })
 
   socket.value.on('error', (error) => {
-    ElMessage.error(`错误: ${error.message}`)
+    addLog('error', `❌ Error: ${error.message}`)
+    ElMessage.error(`Error: ${error.message}`)
   })
 }
 
 const leaveSession = async () => {
   try {
-    await ElMessageBox.confirm('确定要离开会话吗？', '确认', {
-      confirmButtonText: '确认',
-      cancelButtonText: '取消',
+    await ElMessageBox.confirm('Leave this session?', 'Confirm', {
+      confirmButtonText: 'Leave',
+      cancelButtonText: 'Cancel',
       type: 'warning'
     })
     
     if (socket.value) {
       socket.value.disconnect()
     }
-    
     router.push('/')
   } catch {
     // User cancelled
@@ -526,40 +460,33 @@ const chooseNormalConsensus = () => {
   hasChosenAction.value = true
   isNormalMode.value = true
   
-  // 通知后端，这个节点选择正常共识，由机器人代理
   if (socket.value) {
-    socket.value.emit('choose_normal_consensus', {
-      sessionId,
-      nodeId
-    })
+    socket.value.emit('choose_normal_consensus', { sessionId, nodeId })
   }
   
-  ElMessage.success('已选择正常共识，机器人将代替您执行PBFT流程')
+  addLog('info', '✓ Normal consensus mode activated (robot proxy)')
+  ElMessage.success('Normal mode: Robot will handle consensus')
 }
 
 const chooseByzantineAttack = () => {
   hasChosenAction.value = true
   isNormalMode.value = false
   
-  // 通知后端，这个节点选择拜占庭攻击模式
   if (socket.value) {
-    socket.value.emit('choose_byzantine_attack', {
-      sessionId,
-      nodeId
-    })
+    socket.value.emit('choose_byzantine_attack', { sessionId, nodeId })
   }
   
-  ElMessage.warning('已选择拜占庭攻击模式，您可以发送错误信息')
+  addLog('warn', '⚠️ Byzantine attack mode activated')
+  ElMessage.warning('Byzantine mode: You can send error messages')
 }
 
 const sendErrorMessage = () => {
   if (!hasChosenAction.value || isNormalMode.value) {
-    ElMessage.error('请先选择拜占庭攻击模式')
+    ElMessage.error('Switch to Byzantine mode first')
     return
   }
   
   if (socket.value) {
-    // 发送与当前共识值相反的错误信息
     const errorValue = acceptedValue.value === 0 ? 1 : 0
     const errorMessage = {
       sessionId,
@@ -568,365 +495,83 @@ const sendErrorMessage = () => {
       byzantine: true
     }
     
-    // 根据当前阶段发送相应的错误消息
     if (currentPhase.value === 'prepare') {
       socket.value.emit('send_prepare', errorMessage)
     } else if (currentPhase.value === 'commit') {
       socket.value.emit('send_commit', errorMessage)
     }
     
-    ElMessage.warning(`🦹 发送错误信息: ${errorValue}`)
+    addLog('error', `🦹 Sent malicious message with value ${errorValue}`)
+    ElMessage.warning(`Malicious message sent: ${errorValue}`)
   }
 }
 
-const sendPrepare = () => {
-  if (socket.value) {
-    const message = {
-      sessionId,
-      nodeId,
-      value: acceptedValue.value
-    }
-    socket.value.emit('send_prepare', message)
-  }
+const sendProposal = () => {
+  if (!proposalInput.value) return
+  
+  // Implement proposal sending logic
+  addLog('info', `📤 Proposal sent: ${proposalInput.value}`)
+  ElMessage.success('Proposal sent')
+  proposalInput.value = ''
 }
 
-const sendCommit = () => {
-  if (socket.value) {
-    const message = {
-      sessionId,
-      nodeId,
-      value: acceptedValue.value
-    }
-    socket.value.emit('send_commit', message)
-  }
+const clearLogs = () => {
+  auditLogs.value = []
+  ElMessage.success('Logs cleared')
 }
 
 const getPhasePercentage = () => {
   return Math.round((phaseStep.value / 4) * 100)
 }
 
-const getPhaseStatus = () => {
-  if (phaseStep.value === 4) return 'success'
-  if (phaseStep.value > 0) return 'warning'
-  return ''
+const getPhaseShortName = (phase) => {
+  const names = {
+    'prepare': 'PREP',
+    'pre-commit': 'PRE-C',
+    'commit': 'COMMIT',
+    'decide': 'DECIDE'
+  }
+  return names[phase] || phase.toUpperCase()
 }
 
 const getPhaseDisplayName = (phase) => {
   const names = {
-    'new-view': 'New-View 阶段',
-    'pre-prepare': 'Prepare 阶段', // 兼容旧命名
-    'prepare': 'Prepare 阶段',
-    'pre-commit': 'Pre-Commit 阶段',
-    'commit': 'Commit 阶段',
-    'decide': 'Decide 阶段',
-    'reply': 'Decide 阶段' // 兼容旧命名
+    'new-view': 'New-View',
+    'pre-prepare': 'Prepare',
+    'prepare': 'Prepare',
+    'pre-commit': 'Pre-Commit',
+    'commit': 'Commit',
+    'decide': 'Decide',
+    'reply': 'Decide'
   }
   return names[phase] || phase
 }
 
 const getMessageTypeName = (type) => {
   const names = {
-    'pre-prepare': '提议',
-    'prepare': '准备',
-    'commit': '提交',
-    'reply': '回复'
+    'pre-prepare': 'PROPOSAL',
+    'prepare': 'PREPARE',
+    'commit': 'COMMIT',
+    'reply': 'REPLY'
   }
-  return names[type] || type
+  return names[type] || type.toUpperCase()
 }
 
 const getAcceptedContentDisplay = () => {
   const proposalContent = sessionConfig.value.proposalContent
-  const currentAcceptedValue = acceptedValue.value
-  
-  console.log('getAcceptedContentDisplay called:', {
-    acceptedValue: currentAcceptedValue,
-    proposalContent: proposalContent,
-    proposalContentType: typeof proposalContent,
-    proposalContentLength: proposalContent ? proposalContent.length : 0,
-    hasProposalContent: proposalContent && proposalContent.trim(),
-    sessionConfig: sessionConfig.value
-  })
-  
-  // If there's proposal content, prioritize displaying it
   if (proposalContent && proposalContent.trim()) {
-    console.log('Display proposal content:', proposalContent)
     return proposalContent
   }
-  
-  // If acceptedValue is null, display undecided
-  if (currentAcceptedValue === null) {
-    console.log('Display undecided')
-    return '未决定'
+  if (acceptedValue.value === null) {
+    return '—'
   }
-  
-  // Otherwise display default Option A/B
-  const result = currentAcceptedValue === 0 ? '选项A' : '选项B'
-  console.log('Display default option:', result)
-  return result
+  return acceptedValue.value === 0 ? 'Option A' : 'Option B'
 }
-
-const formatTime = (timestamp) => {
-  return new Date(timestamp).toLocaleTimeString()
-}
-
-const exportMessages = () => {
-  const data = receivedMessages.value.map(msg => ({
-    Time: formatTime(msg.timestamp),
-    来源: `参与者${msg.from}`,
-    类型: getMessageTypeName(msg.type),
-    内容: msg.value === -1 ? '拒绝' : (msg.value !== null ? (msg.value === 0 ? (sessionConfig.value.proposalContent || '选项A') : (sessionConfig.value.proposalContent || '选项B')) : '无')
-  }))
-  
-  const csv = [
-    Object.keys(data[0]).join(','),
-    ...data.map(row => Object.values(row).join(','))
-  ].join('\n')
-  
-  const blob = new Blob([csv], { type: 'text/csv' })
-  const url = window.URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `messages_${sessionId}_${nodeId}.csv`
-  a.click()
-  window.URL.revokeObjectURL(url)
-  
-  ElMessage.success('消息已导出')
-}
-
-const clearMessages = () => {
-  receivedMessages.value = []
-  ElMessage.success('消息已清除')
-}
-
-const refreshTopology = () => {
-  topologyConnections.value = []
-  
-  // Generate connections based on topology
-  if (sessionConfig.value.topology === 'full') {
-    for (let i = 0; i < sessionConfig.value.nodeCount; i++) {
-      for (let j = i + 1; j < sessionConfig.value.nodeCount; j++) {
-        // Calculate node center position
-        const nodeSize = 40
-        const x1 = getNodeX(i) + nodeSize / 2
-        const y1 = getNodeY(i) + nodeSize / 2
-        const x2 = getNodeX(j) + nodeSize / 2
-        const y2 = getNodeY(j) + nodeSize / 2
-        
-        topologyConnections.value.push({
-          from: i,
-          to: j,
-          x1: x1,
-          y1: y1,
-          x2: x2,
-          y2: y2,
-          active: connectedNodes.value.includes(i) && connectedNodes.value.includes(j)
-        })
-      }
-    }
-  }
-}
-
-const getNodeX = (nodeId) => {
-  const containerWidth = topologyWidth.value
-  const radius = Math.min(containerWidth, topologyHeight.value) / 2.2  // Increase radius to bring nodes closer to edge
-  const nodeSize = 40  // Node size
-  
-  if (sessionConfig.value.topology === 'full' || sessionConfig.value.topology === 'ring') {
-    const angle = (2 * Math.PI * nodeId) / sessionConfig.value.nodeCount
-    const centerX = containerWidth / 2 + radius * Math.cos(angle)
-    // Adjust position to center-align nodes
-    return centerX - nodeSize / 2
-  }
-  
-  return (containerWidth / (sessionConfig.value.nodeCount + 1)) * (nodeId + 1) - nodeSize / 2
-}
-
-const getNodeY = (nodeId) => {
-  const containerHeight = topologyHeight.value
-  const radius = Math.min(topologyWidth.value, containerHeight) / 2.2  // Increase radius to bring nodes closer to edge
-  const nodeSize = 40  // Node size
-  
-  if (sessionConfig.value.topology === 'full' || sessionConfig.value.topology === 'ring') {
-    const angle = (2 * Math.PI * nodeId) / sessionConfig.value.nodeCount
-    const centerY = containerHeight / 2 + radius * Math.sin(angle)
-    // Adjust position to center-align nodes
-    return centerY - nodeSize / 2
-  }
-  
-  return containerHeight / 2 - nodeSize / 2
-}
-
-const isNodeVisible = (nodeId) => {
-  return connectedNodes.value.includes(nodeId)
-}
-
-const isNodeActive = (nodeId) => {
-  return connectedNodes.value.includes(nodeId)
-}
-
-const hasNodeMessages = (nodeId) => {
-  return receivedMessages.value.some(msg => msg.from === nodeId)
-}
-
-const getNodeMessageCount = (nodeId) => {
-  return receivedMessages.value.filter(msg => msg.from === nodeId).length
-}
-
-const getNodeMessages = (nodeId) => {
-  return receivedMessages.value.filter(msg => msg.from === nodeId)
-}
-
-const showNodeDetails = (nodeId) => {
-  selectedNode.value = nodeId
-  nodeDetailsVisible.value = true
-}
-
-const getTopologyName = (topology) => {
-  const names = {
-    full: '全连接',
-    ring: '环形',
-    star: '星形',
-    tree: '树形'
-  }
-  return names[topology] || topology
-}
-
-const getActiveConnections = () => {
-  return topologyConnections.value.filter(conn => conn.active).length
-}
-
-// Consensus result display function
-const showConsensusResult = () => {
-  console.log('显示共识结果')
-  
-  // 根据当前阶段和状态模拟不同的共识结果
-  let result
-  
-  if (currentPhase.value === 'prepare') {
-    result = {
-      status: '准备阶段未完成',
-      description: '准备阶段需要更多节点参与',
-      stats: {
-        expected_nodes: sessionConfig.value.nodeCount,
-        expected_prepare_nodes: sessionConfig.value.nodeCount - 1,
-        total_messages: receivedMessages.value.length
-      }
-    }
-  } else if (currentPhase.value === 'commit') {
-    // 根据实际接收到的消息分析共识结果
-    const commitMessages = receivedMessages.value.filter(msg => msg.type === 'commit')
-    const correctMessages = commitMessages.filter(msg => msg.value === 0).length
-    const errorMessages = commitMessages.filter(msg => msg.value === 1).length
-    
-    // 计算故障节点数 f = floor((n-1)/3)
-    const n = sessionConfig.value.nodeCount
-    const f = Math.floor((n - 1) / 3)
-    const requiredCorrect = 2 * f + 1
-    const requiredError = f + 1
-    
-    console.log(`提交阶段分析 - 总节点数: ${n}, 故障节点数: ${f}`)
-    console.log(`提交阶段分析 - 正确消息: ${correctMessages}, 错误消息: ${errorMessages}`)
-    console.log(`提交阶段分析 - 需要正确消息: ${requiredCorrect}, 需要错误消息: ${requiredError}`)
-    
-    if (correctMessages >= requiredCorrect) {
-      result = {
-        status: '共识成功',
-        description: `收到${correctMessages}个正确消息（需要${requiredCorrect}个）`,
-        stats: {
-          expected_nodes: sessionConfig.value.nodeCount,
-          expected_prepare_nodes: sessionConfig.value.nodeCount - 1,
-          total_messages: receivedMessages.value.length
-        }
-      }
-    } else if (errorMessages >= requiredError) {
-      result = {
-        status: '共识失败',
-        description: `收到${errorMessages}个错误消息（需要${requiredError}个）`,
-        stats: {
-          expected_nodes: sessionConfig.value.nodeCount,
-          expected_prepare_nodes: sessionConfig.value.nodeCount - 1,
-          total_messages: receivedMessages.value.length
-        }
-      }
-    } else {
-      result = {
-        status: '提交阶段等待中',
-        description: `正确消息: ${correctMessages}, 错误消息: ${errorMessages}，等待更多消息`,
-        stats: {
-          expected_nodes: sessionConfig.value.nodeCount,
-          expected_prepare_nodes: sessionConfig.value.nodeCount - 1,
-          total_messages: receivedMessages.value.length
-        }
-      }
-    }
-  } else if (currentPhase.value === 'completed') {
-    result = {
-      status: '共识已完成',
-      description: '共识过程已经完成',
-      stats: {
-        expected_nodes: sessionConfig.value.nodeCount,
-        expected_prepare_nodes: sessionConfig.value.nodeCount - 1,
-        total_messages: receivedMessages.value.length
-      }
-    }
-  } else {
-    result = {
-      status: '提议阶段',
-      description: '正在等待提议',
-      stats: {
-        expected_nodes: sessionConfig.value.nodeCount,
-        expected_prepare_nodes: sessionConfig.value.nodeCount - 1,
-        total_messages: receivedMessages.value.length
-      }
-    }
-  }
-  
-  // 直接调用事件处理函数
-  console.log('收到共识结果:', result)
-  console.log('共识结果状态:', result.status)
-  console.log('共识结果描述:', result.description)
-  
-  // 根据共识结果显示不同的消息
-  if (result.status === '共识成功') {
-    console.log('显示成功消息')
-    ElMessage.success(`共识成功: ${result.description}`)
-  } else if (result.status === '共识失败') {
-    console.log('显示失败消息')
-    ElMessage.error(`共识失败: ${result.description}`)
-  } else if (result.status === '拒绝提议') {
-    console.log('显示拒绝消息')
-    ElMessage.warning(`拒绝提议: ${result.description}`)
-  } else if (result.status === '无诚实节点') {
-    console.log('显示无诚实节点消息')
-    ElMessage.error(`无诚实节点: ${result.description}`)
-  } else {
-    console.log('显示其他消息')
-    ElMessage.info(`共识结果: ${result.status} - ${result.description}`)
-  }
-}
-
-
-
-const isMyTurn = computed(() => {
-  // Only non-proposer nodes (validators) should show validator quick actions
-  if (nodeId === 0) {
-    return false  // Proposer should not show validator quick actions
-  }
-  return currentPhase.value === 'prepare' || currentPhase.value === 'commit'
-})
-
-// Whether proposer can send messages
-const canProposerSendCustom = computed(() => {
-  return nodeId === 0
-})
-
-
-// Message sending related methods (custom message functionality removed)
-
 
 // Lifecycle
 onMounted(() => {
   connectToServer()
+  addLog('info', `🚀 Terminal initialized for Node ${nodeId}`)
 })
 
 onUnmounted(() => {
@@ -937,473 +582,357 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.node-page {
-  min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+/* ========== Terminal Page ========== */
+.terminal-page {
+  min-height: calc(100vh - 64px);
+  background: #f0f2f5;
+  padding: 0;
 }
 
-.header {
-  background: rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.2);
-  padding: 0 20px;
-}
-
-.header-content {
+/* ========== Header ========== */
+.terminal-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  height: 100%;
-  color: white;
+  padding: 16px 20px;
+  background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+  border-bottom: 3px solid #1890ff;
 }
 
-.node-info h2 {
-  margin: 0;
-  font-size: 1.5rem;
-  font-weight: 300;
-}
-
-.session-info {
+.header-left {
   display: flex;
+  gap: 12px;
   align-items: center;
-  gap: 15px;
 }
 
-.main-content {
-  padding: 20px;
+.role-badge {
+  font-weight: 700;
+  letter-spacing: 1px;
 }
 
-.progress-card, .messages-card, .topology-card {
-  background: rgba(255, 255, 255, 0.95);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 15px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-  height: 100%;
-}
-
-.card-header {
+.header-right {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-weight: 600;
-  color: #2c3e50;
-}
-
-.consensus-progress {
-  padding: 10px 0;
-}
-
-.phase-progress {
-  margin-bottom: 20px;
-}
-
-.phase-steps {
-  margin-top: 15px;
-}
-
-.current-status {
-  margin-bottom: 20px;
-}
-
-.current-status h4 {
-  margin-bottom: 10px;
-  color: #2c3e50;
-}
-
-.quick-actions {
-  margin-top: 20px;
-}
-
-.quick-actions h4 {
-  margin-bottom: 10px;
-  color: #2c3e50;
-}
-
-.quick-actions-buttons {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  align-items: stretch;
-}
-
-.quick-action-btn {
-  width: 100%;
-  text-align: center;
-  justify-content: center;
-  display: flex;
-  align-items: center;
-  height: 40px;
-  border-radius: 6px;
-  font-size: 14px;
-  font-weight: 500;
-  border: none;
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0 16px;
-  line-height: 1;
-  vertical-align: middle;
-}
-
-/* 确保两个按钮的尺寸完全一致 */
-.quick-actions-buttons .el-button {
-  height: 40px !important;
-  min-height: 40px !important;
-  max-height: 40px !important;
-  border-radius: 6px !important;
-  font-size: 14px !important;
-  font-weight: 500 !important;
-  padding: 0 16px !important;
-  margin: 0 !important;
-  box-sizing: border-box !important;
-}
-
-.proposer-info {
-  margin-top: 10px;
-  text-align: center;
-}
-
-/* Byzantine node identifier */
-.node-info h2.bad-node {
-  color: #f56c6c;
-  position: relative;
-}
-
-.node-info h2.bad-node::after {
-  content: '🦹';
-  position: absolute;
-  right: -25px;
-  top: 0;
-  font-size: 16px;
-}
-
-/* Message sending form */
-.message-form {
-  margin-top: 20px;
-  padding-top: 20px;
-  border-top: 1px solid #e4e7ed;
-}
-
-.message-form h4 {
-  margin-bottom: 15px;
-  color: #2c3e50;
-}
-
-.form-tip {
-  margin-left: 10px;
-  color: #909399;
-  font-size: 12px;
-}
-
-/* Attack control area styles */
-.attack-control {
-  margin-top: 20px;
-  padding: 15px;
-  border: 2px solid #f56c6c;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #fff5f5 0%, #fef0f0 100%);
-  position: relative;
-}
-
-.simple-attack-control {
-  text-align: center;
-}
-
-.attack-tip {
-  margin-top: 10px;
-}
-
-.attack-control::before {
-  content: '⚠️';
-  position: absolute;
-  top: -10px;
-  left: 15px;
-  background: #fff;
-  padding: 0 8px;
-  font-size: 16px;
-}
-
-.attack-control h4 {
-  color: #f56c6c;
-  margin: 0 0 15px 0;
-  font-weight: bold;
-}
-
-.attack-control .el-form-item {
-  margin-bottom: 12px;
-}
-
-.attack-control .el-slider {
-  margin-top: 5px;
-}
-
-.attack-control .el-radio-group {
-  display: flex;
-  flex-direction: column;
   gap: 8px;
 }
 
-.attack-stats {
-  margin-top: 15px;
-  padding: 10px;
-  background: rgba(245, 108, 108, 0.1);
-  border-radius: 4px;
-  border-left: 3px solid #f56c6c;
+/* ========== Main Content ========== */
+.terminal-main {
+  height: calc(100vh - 120px);
 }
 
-.attack-stats h5 {
-  margin: 0 0 10px 0;
-  font-size: 13px;
+/* ========== Control Panel ========== */
+.control-panel {
+  height: 100%;
+  background: #fff;
+  border-right: 2px solid #e8e8e8;
+  display: flex;
+  flex-direction: column;
 }
 
-.attack-stats .el-descriptions {
-  font-size: 12px;
+.panel-header,
+.log-header {
+  padding: 16px 20px;
+  background: #fafafa;
+  border-bottom: 1px solid #e8e8e8;
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
-.attack-stats .el-descriptions-item__label {
-  color: #f56c6c;
-  font-weight: bold;
+.header-line {
+  width: 3px;
+  height: 18px;
+  background: #1890ff;
+  border-radius: 2px;
 }
 
-.attack-stats .el-descriptions-item__content {
+.panel-title,
+.log-title {
+  font-size: 14px;
+  font-weight: 700;
   color: #303133;
-  font-weight: bold;
+  letter-spacing: 1px;
 }
 
-.messages-container {
-  height: 400px;
+.log-actions {
+  margin-left: auto;
+}
+
+.panel-content {
+  flex: 1;
+  padding: 20px;
   overflow-y: auto;
 }
 
-.messages-header {
+/* ========== Sections ========== */
+.section-title {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  margin-bottom: 15px;
+  gap: 8px;
+  font-size: 14px;
   font-weight: 600;
-  color: #2c3e50;
-}
-
-.message-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.message-item-compact {
-  background: #f8f9fa;
-  border-radius: 8px;
-  padding: 10px;
-  border-left: 3px solid #409eff;
-}
-
-.message-header-compact {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 5px;
-  font-size: 12px;
   color: #606266;
+  margin-bottom: 16px;
 }
 
-.message-content-compact {
+.divider-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: #909399;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* ========== Proposal Section ========== */
+.proposal-section {
+  margin-bottom: 24px;
+}
+
+.proposal-input-group {
+  margin-bottom: 12px;
+}
+
+.proposal-input :deep(.el-input__wrapper) {
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px #d9d9d9 inset;
+  transition: all 0.3s;
+}
+
+.proposal-input :deep(.el-input__wrapper:hover) {
+  box-shadow: 0 0 0 1px #1890ff inset;
+}
+
+.proposal-input :deep(.el-input__wrapper.is-focus) {
+  box-shadow: 0 0 0 2px #1890ff inset;
+}
+
+.proposal-quick-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ========== Progress Section ========== */
+.progress-section {
+  margin-bottom: 24px;
+}
+
+.progress-ring-container {
+  display: flex;
+  justify-content: center;
+  margin: 24px 0;
+}
+
+.progress-content {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  font-size: 13px;
+  align-items: center;
+  gap: 4px;
 }
 
-.message-type {
+.progress-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: #303133;
+}
+
+.progress-phase {
+  font-size: 12px;
+  color: #909399;
   font-weight: 600;
-  color: #409eff;
+  letter-spacing: 1px;
 }
 
-.message-value {
-  color: #2c3e50;
+.phase-timeline {
+  margin-top: 24px;
 }
 
-.no-messages {
+/* ========== Action Section ========== */
+.action-section {
+  margin-bottom: 24px;
+}
+
+.waiting-box {
   text-align: center;
-  padding: 40px 0;
+  padding: 40px 20px;
+  color: #909399;
 }
 
-.dynamic-topology {
-  padding: 10px 0;
+.waiting-icon {
+  margin-bottom: 16px;
+  color: #1890ff;
+  animation: rotate 2s linear infinite;
 }
 
-.topology-info {
-  margin-bottom: 15px;
-  padding: 10px;
-  background: #f8f9fa;
-  border-radius: 8px;
+@keyframes rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
-.topology-info p {
-  margin: 5px 0;
-  font-size: 14px;
-  color: #606266;
+.action-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-.topology-container {
-  position: relative;
+.action-btn {
   width: 100%;
-  height: 400px;
-  background: #f8f9fa;
-  border-radius: 10px;
-  margin-bottom: 20px;
-}
-
-.connection-lines {
-  position: absolute;
-  top: 0;
-  left: 0;
-  z-index: 1;
-}
-
-.active-connection {
-  stroke: #67c23a;
-  stroke-width: 2;
-}
-
-.inactive-connection {
-  stroke: #dcdfe6;
-  stroke-width: 1;
-}
-
-.topology-node {
-  position: absolute;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  background: #409eff;
-  color: white;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  height: 44px;
   font-weight: 600;
-  cursor: pointer;
-  z-index: 2;
-  transition: all 0.3s ease;
-  border: 2px solid white;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  letter-spacing: 0.5px;
 }
 
-.topology-node:hover {
-  transform: scale(1.1);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+.byzantine-controls {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-.topology-node.current-node {
-  background: #67c23a;
-  border-color: #67c23a;
+.mode-alert {
+  border-radius: 6px;
 }
 
-.topology-node.proposer {
-  background: #e6a23c;
-  border-color: #e6a23c;
-}
-
-.topology-node.visible-node {
-  opacity: 1;
-}
-
-.topology-node.invisible-node {
-  opacity: 0.3;
-}
-
-.topology-node.has-messages {
-  border-color: #f56c6c;
-}
-
-.topology-node.active {
-  animation: pulse 2s infinite;
-}
-
-
-.node-number {
-  font-size: 14px;
+.error-btn {
+  width: 100%;
+  height: 44px;
   font-weight: 600;
 }
 
-.node-status-indicator {
-  position: absolute;
-  top: -2px;
-  right: -2px;
-  width: 8px;
-  height: 8px;
-  background: #67c23a;
-  border-radius: 50%;
-  border: 1px solid white;
+.normal-mode-info {
+  margin-top: 16px;
 }
 
-.message-count {
-  position: absolute;
-  top: -8px;
-  right: -8px;
-  background: #f56c6c;
-  color: white;
-  border-radius: 50%;
-  width: 16px;
-  height: 16px;
-  font-size: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid white;
+/* ========== Status Section ========== */
+.status-section {
+  margin-top: 24px;
 }
 
-
-.node-messages {
-  max-height: 300px;
-  overflow-y: auto;
+.status-table {
+  font-size: 13px;
 }
 
-.message-item {
-  background: #f8f9fa;
-  border-radius: 8px;
-  padding: 10px;
-  margin-bottom: 10px;
-  border-left: 3px solid #409eff;
-}
-
-.message-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 5px;
-  font-size: 12px;
+.status-table :deep(.el-descriptions__label) {
+  font-weight: 600;
   color: #606266;
 }
 
-.message-content {
+/* ========== Audit Log ========== */
+.audit-log {
+  height: 100%;
+  background: #1e1e1e;
+  display: flex;
+  flex-direction: column;
+}
+
+.audit-log .log-header {
+  background: #2d2d2d;
+  border-bottom: 1px solid #3e3e3e;
+}
+
+.audit-log .panel-title,
+.audit-log .log-title {
+  color: #d4d4d4;
+}
+
+.log-content {
+  flex: 1;
+  padding: 12px;
+  overflow-y: auto;
+  font-family: 'JetBrains Mono', 'Roboto Mono', 'Fira Code', 'Courier New', Consolas, monospace !important;
   font-size: 13px;
-  color: #2c3e50;
+  line-height: 1.6;
 }
 
-@keyframes pulse {
-  0% {
-    box-shadow: 0 0 0 0 rgba(64, 158, 255, 0.7);
-  }
-  70% {
-    box-shadow: 0 0 0 10px rgba(64, 158, 255, 0);
-  }
-  100% {
-    box-shadow: 0 0 0 0 rgba(64, 158, 255, 0);
-  }
+.log-entry {
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  border-radius: 4px;
+  transition: background 0.2s;
 }
 
-@media (max-width: 768px) {
-  .main-content {
-    padding: 10px;
+.log-entry:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.log-time {
+  color: #858585;
+  margin-right: 8px;
+}
+
+.log-type {
+  margin-right: 8px;
+  font-weight: 600;
+}
+
+.log-message {
+  color: #d4d4d4;
+}
+
+/* Log Type Colors */
+.log-info .log-type {
+  color: #4ec9b0;
+}
+
+.log-warn .log-type {
+  color: #dcdcaa;
+}
+
+.log-error .log-type {
+  color: #f48771;
+}
+
+.log-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #858585;
+  gap: 16px;
+}
+
+/* ========== Scrollbar ========== */
+.panel-content::-webkit-scrollbar,
+.log-content::-webkit-scrollbar {
+  width: 6px;
+}
+
+.panel-content::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+.log-content::-webkit-scrollbar-track {
+  background: #2d2d2d;
+}
+
+.panel-content::-webkit-scrollbar-thumb {
+  background: #d0d0d0;
+  border-radius: 3px;
+}
+
+.log-content::-webkit-scrollbar-thumb {
+  background: #4a4a4a;
+  border-radius: 3px;
+}
+
+.panel-content::-webkit-scrollbar-thumb:hover {
+  background: #b0b0b0;
+}
+
+.log-content::-webkit-scrollbar-thumb:hover {
+  background: #5a5a5a;
+}
+
+/* ========== Responsive ========== */
+@media (max-width: 1200px) {
+  .terminal-main {
+    height: auto;
   }
   
-  .header-content {
-    flex-direction: column;
-    gap: 10px;
-  }
-  
-  .node-info h2 {
-    font-size: 1.2rem;
+  .control-panel,
+  .audit-log {
+    height: auto;
+    min-height: 400px;
   }
 }
-</style> 
+</style>

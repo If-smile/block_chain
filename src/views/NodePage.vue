@@ -393,6 +393,13 @@ const connectToServer = () => {
     phaseStep.value = data.step
     if (data.view !== undefined) currentView.value = data.view
     if (data.leader !== undefined) currentLeaderId.value = data.leader
+    
+    // 解锁等待状态：收到任何 phase_update 都表示共识已启动
+    if (waitingForNextRound.value) {
+      waitingForNextRound.value = false
+      addLog('info', '✓ Consensus initialized, UI unlocked')
+    }
+    
     addLog('info', `Phase updated: ${data.phase.toUpperCase()} (Step ${data.step}/4)`)
   })
 

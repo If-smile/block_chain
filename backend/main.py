@@ -950,6 +950,21 @@ async def connect(sid, environ, auth):
         })
         await sio.emit('session_config', config, room=sid)
         
+        # 发送当前共识状态，确保新连接的节点能同步状态
+        current_view = session.get("current_view", 0)
+        current_phase = session.get("phase", "prepare")
+        current_step = session.get("phase_step", 0)
+        current_leader = session.get("leader_id", 0)
+        
+        await sio.emit('phase_update', {
+            "phase": current_phase,
+            "step": current_step,
+            "leader": current_leader,
+            "view": current_view
+        }, room=sid)
+        
+        print(f"节点 {node_id} 同步状态: View={current_view}, Phase={current_phase}, Step={current_step}, Leader={current_leader}")
+        
         # 人类节点进入时，不参加当前轮次的共识
         # 只发送会话配置，不发送当前轮次信息和历史消息
         print(f"人类节点 {node_id} 进入，等待下一轮共识开始")
@@ -1026,10 +1041,13 @@ async def send_prepare(sid, data):
     
     # 单播给上级（不广播）
     if target_sid:
-        count_message_sent(session_id, is_broadcast=False)
-        await sio.emit('message_received', vote_message, room=target_sid)
-        role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
-        print(f"[双层 HotStuff] 节点 {node_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(prepare)")
+        if should_deliver_message(session_id):
+            count_message_sent(session_id, is_broadcast=False)
+            await sio.emit('message_received', vote_message, room=target_sid)
+            role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
+            print(f"[双层 HotStuff] 节点 {node_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(prepare)")
+        else:
+            print(f"[网络模拟] 节点 {node_id} 的 VOTE(prepare) 消息被丢弃 (目标: {target_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
     else:
         print(f"[双层 HotStuff] 目标 {target_id} 不在线，缓存 VOTE")
     
@@ -1079,10 +1097,13 @@ async def send_commit(sid, data):
     
     # 单播给上级（不广播）
     if target_sid:
-        count_message_sent(session_id, is_broadcast=False)
-        await sio.emit('message_received', vote_message, room=target_sid)
-        role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
-        print(f"[双层 HotStuff] 节点 {node_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(commit)")
+        if should_deliver_message(session_id):
+            count_message_sent(session_id, is_broadcast=False)
+            await sio.emit('message_received', vote_message, room=target_sid)
+            role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
+            print(f"[双层 HotStuff] 节点 {node_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(commit)")
+        else:
+            print(f"[网络模拟] 节点 {node_id} 的 VOTE(commit) 消息被丢弃 (目标: {target_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
     else:
         print(f"[双层 HotStuff] 目标 {target_id} 不在线，缓存 VOTE")
     
@@ -1409,9 +1430,12 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
         # 发送给 Global Leader
         global_leader_sid = node_sockets.get(session_id, {}).get(global_leader_id)
         if global_leader_sid:
-            count_message_sent(session_id, is_broadcast=False)
-            await sio.emit('message_received', group_vote_message, room=global_leader_sid)
-            print(f"[双层 HotStuff] Group Leader {group_leader_id} 向 Global Leader {global_leader_id} 发送 GroupVote (权重={len(group_voters)})")
+            if should_deliver_message(session_id):
+                count_message_sent(session_id, is_broadcast=False)
+                await sio.emit('message_received', group_vote_message, room=global_leader_sid)
+                print(f"[双层 HotStuff] Group Leader {group_leader_id} 向 Global Leader {global_leader_id} 发送 GroupVote (权重={len(group_voters)})")
+            else:
+                print(f"[网络模拟] Group Leader {group_leader_id} 的 GroupVote 消息被丢弃 (目标: Global Leader {global_leader_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
         
         # 递归处理 GroupVote（作为 Global Leader 收到的投票）
         await handle_vote(session_id, group_vote_message)
@@ -1461,6 +1485,12 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
             "group_voters": [voter]
         })
         print(f"[双层 HotStuff] Global Leader {global_leader_id} 收到节点 {voter} 的直接投票, 总权重={pending[key]['total_weight']}")
+    
+    # ========== 防止重复处理：检查当前会话的 phase 是否已经翻篇 ==========
+    current_session_phase = session.get("phase", "prepare")
+    if phase != current_session_phase:
+        print(f"[防重复] 投票的 phase ({phase}) 与当前会话 phase ({current_session_phase}) 不匹配，忽略（该阶段已完成或尚未开始）")
+        return
     
     # 检查全局阈值（基于权重）
     threshold = get_quorum_threshold(session)
@@ -1519,8 +1549,11 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
     for gl_id in group_leaders:
         gl_sid = node_sockets.get(session_id, {}).get(gl_id)
         if gl_sid:
-            count_message_sent(session_id, is_broadcast=False)
-            await sio.emit('message_received', qc_message, room=gl_sid)
+            if should_deliver_message(session_id):
+                count_message_sent(session_id, is_broadcast=False)
+                await sio.emit('message_received', qc_message, room=gl_sid)
+            else:
+                print(f"[网络模拟] QC 消息被丢弃 (目标: Group Leader {gl_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
     
     # 第二步：Group Leaders 转发给组内 Members
     for gl_id in group_leaders:
@@ -1537,8 +1570,11 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
         for member_id in range(group_start_id + 1, group_end_id):  # +1 因为 Group Leader 自己不需要转发
             member_sid = node_sockets.get(session_id, {}).get(member_id)
             if member_sid:
-                count_message_sent(session_id, is_broadcast=False)
-                await sio.emit('message_received', forward_message, room=member_sid)
+                if should_deliver_message(session_id):
+                    count_message_sent(session_id, is_broadcast=False)
+                    await sio.emit('message_received', forward_message, room=member_sid)
+                else:
+                    print(f"[网络模拟] QC 转发消息被丢弃 (目标: Member {member_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
     
     # 统计消息数：Global Leader -> Group Leaders (K-1) + Group Leaders -> Members (N-K)
     total_forward_messages = len(group_leaders) + (n - len(group_leaders) - 1)  # -1 排除 Global Leader
@@ -1849,7 +1885,7 @@ async def finalize_consensus(session_id: str, status: str = "共识完成", desc
         print(f"View {current_view} 共识已完成，取消超时任务")
     
     session["phase"] = "completed"
-    session["phase_step"] = 3
+    session["phase_step"] = 4  # Fix: Set to 4 to match frontend 100% progress (4 steps total)
     session["status"] = "completed"
     
     config = session["config"]
@@ -2103,6 +2139,23 @@ async def trigger_view_change(session_id: str, old_view: int):
     session["current_view"] = new_view
     session["leader_id"] = next_leader_id
     
+    # ========== 重置所有机器人节点的投票状态（修复 Timeout Loop） ==========
+    # 在视图切换时，必须重置机器人的 sent_prepare/sent_commit 标志
+    # 否则机器人会误以为自己在新 View 中已投票，导致拒绝再次投票
+    print(f"[View Change] 重置所有机器人节点的投票状态...")
+    for robot_id in session.get("robot_nodes", []):
+        if robot_id not in session["robot_node_states"]:
+            session["robot_node_states"][robot_id] = {}
+        
+        session["robot_node_states"][robot_id] = {
+            "received_pre_prepare": False,
+            "received_prepare_count": 0,
+            "received_commit_count": 0,
+            "sent_prepare": False,  # 关键：重置此标志，允许在新 View 中重新投票
+            "sent_commit": False
+        }
+        print(f"  机器人节点 {robot_id}: 投票状态已重置")
+    
     # 所有节点发送 NEW-VIEW 消息给 Next Leader
     for node_id in range(n):
         node_state = session["node_states"].get(node_id, {})
@@ -2128,8 +2181,11 @@ async def trigger_view_change(session_id: str, old_view: int):
             # 人类节点：通过 WebSocket 发送
             node_sid = node_sockets.get(session_id, {}).get(node_id)
             if node_sid:
-                count_message_sent(session_id, is_broadcast=False)
-                await sio.emit('message_received', new_view_msg, room=node_sid)
+                if should_deliver_message(session_id):
+                    count_message_sent(session_id, is_broadcast=False)
+                    await sio.emit('message_received', new_view_msg, room=node_sid)
+                else:
+                    print(f"[网络模拟] 节点 {node_id} 的 NEW-VIEW 消息被丢弃 (目标: Next Leader {next_leader_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
         
         # Leader 收集 NEW-VIEW 消息
         if node_id == next_leader_id:
@@ -2436,8 +2492,11 @@ async def robot_send_pre_prepare(session_id: str, highQC: Optional[Dict] = None)
     for gl_id in group_leaders:
         gl_sid = node_sockets.get(session_id, {}).get(gl_id)
         if gl_sid:
-            count_message_sent(session_id, is_broadcast=False)
-            await sio.emit('message_received', message, room=gl_sid)
+            if should_deliver_message(session_id):
+                count_message_sent(session_id, is_broadcast=False)
+                await sio.emit('message_received', message, room=gl_sid)
+            else:
+                print(f"[网络模拟] Proposal 消息被丢弃 (目标: Group Leader {gl_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
     
     # 第二步：Group Leaders 转发给组内 Members
     for gl_id in group_leaders:
@@ -2454,8 +2513,11 @@ async def robot_send_pre_prepare(session_id: str, highQC: Optional[Dict] = None)
         for member_id in range(group_start_id + 1, group_end_id):  # +1 因为 Group Leader 自己不需要转发
             member_sid = node_sockets.get(session_id, {}).get(member_id)
             if member_sid:
-                count_message_sent(session_id, is_broadcast=False)
-                await sio.emit('message_received', forward_message, room=member_sid)
+                if should_deliver_message(session_id):
+                    count_message_sent(session_id, is_broadcast=False)
+                    await sio.emit('message_received', forward_message, room=member_sid)
+                else:
+                    print(f"[网络模拟] Proposal 转发消息被丢弃 (目标: Member {member_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
     
     # 统计消息数：Global Leader -> Group Leaders (K-1) + Group Leaders -> Members (N-K)
     total_forward_messages = len(group_leaders) + (n - len(group_leaders) - 1)  # -1 排除 Global Leader
@@ -2584,10 +2646,13 @@ async def handle_robot_prepare(session_id: str, robot_id: int, value: int):
     session["messages"]["vote"].append(vote_message)
     
     if target_sid:
-        count_message_sent(session_id, is_broadcast=False)
-        await sio.emit('message_received', vote_message, room=target_sid)
-        role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
-        print(f"[双层 HotStuff] 机器人节点 {robot_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(prepare) [View {current_view}]")
+        if should_deliver_message(session_id):
+            count_message_sent(session_id, is_broadcast=False)
+            await sio.emit('message_received', vote_message, room=target_sid)
+            role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
+            print(f"[双层 HotStuff] 机器人节点 {robot_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(prepare) [View {current_view}]")
+        else:
+            print(f"[网络模拟] 机器人节点 {robot_id} 的 VOTE(prepare) 消息被丢弃 (目标: {target_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
     else:
         print(f"[双层 HotStuff] 目标 {target_id} 不在线，缓存机器人投票")
     
@@ -2654,10 +2719,13 @@ async def handle_robot_commit(session_id: str, robot_id: int, value: int):
     session["messages"]["vote"].append(vote_message)
     
     if target_sid:
-        count_message_sent(session_id, is_broadcast=False)
-        await sio.emit('message_received', vote_message, room=target_sid)
-        role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
-        print(f"[双层 HotStuff] 机器人节点 {robot_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(commit)")
+        if should_deliver_message(session_id):
+            count_message_sent(session_id, is_broadcast=False)
+            await sio.emit('message_received', vote_message, room=target_sid)
+            role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
+            print(f"[双层 HotStuff] 机器人节点 {robot_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(commit)")
+        else:
+            print(f"[网络模拟] 机器人节点 {robot_id} 的 VOTE(commit) 消息被丢弃 (目标: {target_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
     else:
         print(f"[双层 HotStuff] 目标 {target_id} 不在线，缓存机器人投票")
     

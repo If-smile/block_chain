@@ -1,548 +1,655 @@
 <template>
-  <div class="hotstuff-table-container">
-    <h2>HotStuff Stages</h2>
-    
-    <!-- 4种共识算法通信复杂度对比面板 -->
-    <div v-if="complexityComparison" class="complexity-panel">
-      <h3>📊 共识算法通信复杂度对比</h3>
-      <div class="comparison-table">
-        <div 
-          v-for="(algo, key) in comparisonAlgorithms" 
-          :key="key"
-          class="algorithm-card"
-          :class="{ 'current-system': algo.is_current }"
-        >
-          <div class="algorithm-header">
-            <span class="algorithm-name">{{ algo.name }}</span>
-            <span v-if="algo.is_current" class="current-badge">当前系统</span>
-            <span v-else-if="algo.optimization_ratio" class="optimization-badge">
-              {{ algo.optimization_ratio.toFixed(1) }}x 优化
-            </span>
-          </div>
-          <div class="algorithm-stats">
-            <div class="stat-row">
-              <span class="stat-label">消息数量:</span>
-              <span class="stat-value">{{ formatNumber(algo.messages) }}</span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label">复杂度:</span>
-              <span class="stat-value complexity">{{ algo.complexity }}</span>
-            </div>
-          </div>
-          <!-- 进度条可视化 -->
-          <div class="progress-container">
-            <div class="progress-bar-wrapper">
-              <div 
-                class="progress-bar"
-                :class="getProgressBarClass(key)"
-                :style="{ width: getProgressWidth(algo.messages) + '%' }"
-              >
-                <span class="progress-text">{{ formatNumber(algo.messages) }}</span>
-              </div>
-            </div>
-          </div>
-        </div>
+  <el-card class="hotstuff-table-container" shadow="hover">
+    <!-- Card Header with Icon -->
+    <template #header>
+      <div class="card-header">
+        <el-icon :size="24" class="header-icon">
+          <DataAnalysis />
+        </el-icon>
+        <span class="header-title">HotStuff 共识阶段分析</span>
       </div>
+    </template>
+    
+    <!-- 复杂度对比面板 - 使用 ECharts 横向柱状图 -->
+    <el-card v-if="complexityComparison" class="complexity-panel" shadow="never">
+      <template #header>
+        <div class="panel-header">
+          <el-icon :size="20">
+            <TrendCharts />
+          </el-icon>
+          <span>共识算法通信复杂度对比</span>
+        </div>
+      </template>
+      
+      <!-- ECharts 横向柱状图 -->
+      <div class="chart-container">
+        <v-chart 
+          :option="chartOption" 
+          :autoresize="true"
+          class="complexity-chart"
+        />
+      </div>
+      
+      <!-- 底部说明 -->
       <div class="comparison-note">
-        💡 <strong>双层 HotStuff 优势</strong>：通过分组聚合，Global Leader 只需处理 K 个 GroupVote，
+        <el-icon><InfoFilled /></el-icon>
+        <strong>双层 HotStuff 优势：</strong>
+        通过分组聚合，Global Leader 只需处理 K 个 GroupVote，
         而不是 N 个单独投票，通信复杂度显著降低
       </div>
-    </div>
+    </el-card>
     
-    <table v-if="simulationResult" class="hotstuff-table">
-      <thead>
-        <tr>
-          <th>Node</th>
-          <th>Prepare<br /><span class="col-tip">Proposal / Prepare Vote</span></th>
-          <th>Pre-Commit<br /><span class="col-tip">Pre-Commit QC / Vote</span></th>
-          <th>Commit<br /><span class="col-tip">Commit QC / Vote</span></th>
-          <th>Decide<br /><span class="col-tip">Decide QC</span></th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="node in nodes" :key="node">
-          <td>{{ node }}</td>
-          <!-- Prepare column -->
-          <td>
-            <div
-              v-for="msg in getNodePhaseMessages(node, 'prepare')"
-              :key="msgKey(msg)"
-              class="msg-line"
-              :class="[getMsgClass(msg), { 'group-vote': isGroupVote(msg) }]"
-            >
-              {{ msg.src }}→{{ formatDst(msg.dst) }}:
-              <span class="msg-label">{{ formatLabel(msg) }}</span>
-              <span v-if="isGroupVote(msg)" class="group-vote-badge">👑 Group Vote (Weight: {{ msg.weight || 1 }})</span>
+    <!-- 消息日志面板 - 使用 Element Plus Table -->
+    <el-card v-if="simulationResult" class="message-log-panel" shadow="never">
+      <template #header>
+        <div class="panel-header">
+          <el-icon :size="20">
+            <List />
+          </el-icon>
+          <span>节点消息流转记录</span>
+        </div>
+      </template>
+      
+      <el-table 
+        :data="tableData" 
+        stripe 
+        border
+        style="width: 100%"
+        :header-cell-style="{ background: '#f5f7fa', fontWeight: 'bold' }"
+      >
+        <el-table-column prop="node" label="节点" width="80" align="center" />
+        
+        <el-table-column label="Prepare" min-width="200">
+          <template #header>
+            <div class="phase-header">
+              Prepare
+              <span class="phase-tip">Proposal / Prepare Vote</span>
             </div>
-          </td>
-          <!-- Pre-Commit column -->
-          <td>
-            <div
-              v-for="msg in getNodePhaseMessages(node, 'pre-commit')"
-              :key="msgKey(msg)"
-              class="msg-line"
-              :class="[getMsgClass(msg), { 'group-vote': isGroupVote(msg) }]"
-            >
-              {{ msg.src }}→{{ formatDst(msg.dst) }}:
-              <span class="msg-label">{{ formatLabel(msg) }}</span>
-              <span v-if="isGroupVote(msg)" class="group-vote-badge">👑 Group Vote (Weight: {{ msg.weight || 1 }})</span>
+          </template>
+          <template #default="{ row }">
+            <div v-auto-animate class="message-list">
+              <div
+                v-for="msg in row.prepare"
+                :key="msgKey(msg)"
+                class="message-item"
+              >
+                <el-tag 
+                  :type="getTagType(msg)" 
+                  :effect="isGroupVote(msg) ? 'dark' : 'light'"
+                  size="small"
+                  class="message-tag"
+                >
+                  {{ msg.src }}→{{ formatDst(msg.dst) }}:
+                  <span class="msg-label">{{ formatLabel(msg) }}</span>
+                </el-tag>
+                <el-tag 
+                  v-if="isGroupVote(msg)" 
+                  type="warning" 
+                  size="small"
+                  effect="dark"
+                  class="group-badge"
+                >
+                  👑 Group Vote (Weight: {{ msg.weight || 1 }})
+                </el-tag>
+              </div>
             </div>
-          </td>
-          <!-- Commit column -->
-          <td>
-            <div
-              v-for="msg in getNodePhaseMessages(node, 'commit')"
-              :key="msgKey(msg)"
-              class="msg-line"
-              :class="[getMsgClass(msg), { 'group-vote': isGroupVote(msg) }]"
-            >
-              {{ msg.src }}→{{ formatDst(msg.dst) }}:
-              <span class="msg-label">{{ formatLabel(msg) }}</span>
-              <span v-if="isGroupVote(msg)" class="group-vote-badge">👑 Group Vote (Weight: {{ msg.weight || 1 }})</span>
+          </template>
+        </el-table-column>
+        
+        <el-table-column label="Pre-Commit" min-width="200">
+          <template #header>
+            <div class="phase-header">
+              Pre-Commit
+              <span class="phase-tip">Pre-Commit QC / Vote</span>
             </div>
-          </td>
-          <!-- Decide column -->
-          <td>
-            <div
-              v-for="msg in getNodePhaseMessages(node, 'decide')"
-              :key="msgKey(msg)"
-              class="msg-line"
-              :class="[getMsgClass(msg), { 'group-vote': isGroupVote(msg) }]"
-            >
-              {{ msg.src }}→{{ formatDst(msg.dst) }}:
-              <span class="msg-label">{{ formatLabel(msg) }}</span>
-              <span v-if="isGroupVote(msg)" class="group-vote-badge">👑 Group Vote (Weight: {{ msg.weight || 1 }})</span>
+          </template>
+          <template #default="{ row }">
+            <div v-auto-animate class="message-list">
+              <div
+                v-for="msg in row.preCommit"
+                :key="msgKey(msg)"
+                class="message-item"
+              >
+                <el-tag 
+                  :type="getTagType(msg)" 
+                  :effect="isGroupVote(msg) ? 'dark' : 'light'"
+                  size="small"
+                  class="message-tag"
+                >
+                  {{ msg.src }}→{{ formatDst(msg.dst) }}:
+                  <span class="msg-label">{{ formatLabel(msg) }}</span>
+                </el-tag>
+                <el-tag 
+                  v-if="isGroupVote(msg)" 
+                  type="warning" 
+                  size="small"
+                  effect="dark"
+                  class="group-badge"
+                >
+                  👑 Group Vote (Weight: {{ msg.weight || 1 }})
+                </el-tag>
+              </div>
             </div>
-          </td>
-        </tr>
-      </tbody>
-    </table>
-    <div v-else class="no-data">
-      暂无历史数据
-    </div>
-  </div>
+          </template>
+        </el-table-column>
+        
+        <el-table-column label="Commit" min-width="200">
+          <template #header>
+            <div class="phase-header">
+              Commit
+              <span class="phase-tip">Commit QC / Vote</span>
+            </div>
+          </template>
+          <template #default="{ row }">
+            <div v-auto-animate class="message-list">
+              <div
+                v-for="msg in row.commit"
+                :key="msgKey(msg)"
+                class="message-item"
+              >
+                <el-tag 
+                  :type="getTagType(msg)" 
+                  :effect="isGroupVote(msg) ? 'dark' : 'light'"
+                  size="small"
+                  class="message-tag"
+                >
+                  {{ msg.src }}→{{ formatDst(msg.dst) }}:
+                  <span class="msg-label">{{ formatLabel(msg) }}</span>
+                </el-tag>
+                <el-tag 
+                  v-if="isGroupVote(msg)" 
+                  type="warning" 
+                  size="small"
+                  effect="dark"
+                  class="group-badge"
+                >
+                  👑 Group Vote (Weight: {{ msg.weight || 1 }})
+                </el-tag>
+              </div>
+            </div>
+          </template>
+        </el-table-column>
+        
+        <el-table-column label="Decide" min-width="200">
+          <template #header>
+            <div class="phase-header">
+              Decide
+              <span class="phase-tip">Decide QC</span>
+            </div>
+          </template>
+          <template #default="{ row }">
+            <div v-auto-animate class="message-list">
+              <div
+                v-for="msg in row.decide"
+                :key="msgKey(msg)"
+                class="message-item"
+              >
+                <el-tag 
+                  :type="getTagType(msg)" 
+                  :effect="isGroupVote(msg) ? 'dark' : 'light'"
+                  size="small"
+                  class="message-tag"
+                >
+                  {{ msg.src }}→{{ formatDst(msg.dst) }}:
+                  <span class="msg-label">{{ formatLabel(msg) }}</span>
+                </el-tag>
+                <el-tag 
+                  v-if="isGroupVote(msg)" 
+                  type="warning" 
+                  size="small"
+                  effect="dark"
+                  class="group-badge"
+                >
+                  👑 Group Vote (Weight: {{ msg.weight || 1 }})
+                </el-tag>
+              </div>
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+    
+    <el-empty v-else description="暂无历史数据" :image-size="120" />
+  </el-card>
 </template>
 
-<script>
+<script setup>
 import { computed } from 'vue'
+import { use } from 'echarts/core'
+import { CanvasRenderer } from 'echarts/renderers'
+import { BarChart } from 'echarts/charts'
+import {
+  TitleComponent,
+  TooltipComponent,
+  GridComponent,
+  LegendComponent
+} from 'echarts/components'
+import VChart from 'vue-echarts'
+import { 
+  DataAnalysis, 
+  TrendCharts, 
+  List, 
+  InfoFilled 
+} from '@element-plus/icons-vue'
 
-export default {
-  name: 'HotStuffTable',
-  props: {
-    simulationResult: { type: Object, default: null },
-    nodeCount: { type: Number, default: 6 }
-  },
-  setup (props) {
-    const nodes = computed(() => {
-      if (!props.simulationResult || !Array.isArray(props.simulationResult.messages)) {
-        return Array.from({ length: props.nodeCount }, (_, i) => i)
+// 注册 ECharts 组件
+use([
+  CanvasRenderer,
+  BarChart,
+  TitleComponent,
+  TooltipComponent,
+  GridComponent,
+  LegendComponent
+])
+
+const props = defineProps({
+  simulationResult: { type: Object, default: null },
+  nodeCount: { type: Number, default: 6 }
+})
+
+// ========== 节点列表计算 ==========
+const nodes = computed(() => {
+  if (!props.simulationResult || !Array.isArray(props.simulationResult.messages)) {
+    return Array.from({ length: props.nodeCount }, (_, i) => i)
+  }
+  const maxId = props.simulationResult.messages.reduce((max, msg) => {
+    const src = typeof msg.src === 'number' ? msg.src : -1
+    const dst = typeof msg.dst === 'number' ? msg.dst : -1
+    return Math.max(max, src, dst)
+  }, -1)
+  const n = Math.max(maxId + 1, props.nodeCount)
+  return Array.from({ length: n }, (_, i) => i)
+})
+
+// ========== 复杂度对比数据 ==========
+const complexityComparison = computed(() => {
+  if (props.simulationResult?.stats?.complexity_comparison) {
+    return props.simulationResult.stats.complexity_comparison
+  }
+  if (props.simulationResult?.complexity_comparison) {
+    return props.simulationResult.complexity_comparison
+  }
+  return null
+})
+
+const comparisonAlgorithms = computed(() => {
+  if (!complexityComparison.value) return []
+  
+  const comp = complexityComparison.value
+  return [
+    { key: 'double_hotstuff', ...comp.double_hotstuff },
+    { key: 'hotstuff_pure', ...comp.hotstuff_pure },
+    { key: 'pbft_multi_layer', ...comp.pbft_multi_layer },
+    { key: 'pbft_pure', ...comp.pbft_pure }
+  ]
+})
+
+// ========== ECharts 配置 ==========
+const chartOption = computed(() => {
+  if (!comparisonAlgorithms.value || comparisonAlgorithms.value.length === 0) {
+    return {}
+  }
+
+  const algorithms = comparisonAlgorithms.value
+  const yAxisData = algorithms.map(a => a.name).reverse()
+  const seriesData = algorithms.map((a, index) => ({
+    value: a.messages,
+    itemStyle: {
+      color: getBarColor(algorithms.length - 1 - index, a.is_current)
+    },
+    label: {
+      show: true,
+      position: 'right',
+      formatter: (params) => {
+        const algo = algorithms[algorithms.length - 1 - params.dataIndex]
+        return `{value|${formatNumber(params.value)}} {complexity|${algo.complexity}}`
+      },
+      rich: {
+        value: {
+          fontSize: 14,
+          fontWeight: 'bold',
+          color: '#333'
+        },
+        complexity: {
+          fontSize: 12,
+          color: '#666',
+          padding: [0, 0, 0, 8]
+        }
       }
-      const maxId = props.simulationResult.messages.reduce((max, msg) => {
-        const src = typeof msg.src === 'number' ? msg.src : -1
-        const dst = typeof msg.dst === 'number' ? msg.dst : -1
-        return Math.max(max, src, dst)
-      }, -1)
-      const n = Math.max(maxId + 1, props.nodeCount)
-      return Array.from({ length: n }, (_, i) => i)
-    })
+    }
+  })).reverse()
 
-    // 获取复杂度对比数据
-    const complexityComparison = computed(() => {
-      // 优先从 simulationResult.stats.complexity_comparison 获取
-      if (props.simulationResult?.stats?.complexity_comparison) {
-        return props.simulationResult.stats.complexity_comparison
+  return {
+    grid: {
+      left: '15%',
+      right: '35%',
+      top: '5%',
+      bottom: '5%'
+    },
+    xAxis: {
+      type: 'value',
+      name: '消息数量',
+      nameTextStyle: {
+        fontSize: 12,
+        color: '#666'
+      },
+      axisLabel: {
+        formatter: (value) => formatNumber(value)
       }
-      // 兼容：从 simulationResult 根级别获取（如果后端直接返回）
-      if (props.simulationResult?.complexity_comparison) {
-        return props.simulationResult.complexity_comparison
+    },
+    yAxis: {
+      type: 'category',
+      data: yAxisData,
+      axisLabel: {
+        fontSize: 13,
+        fontWeight: 'bold',
+        formatter: (value) => {
+          const algo = algorithms.find(a => a.name === value)
+          return algo?.is_current ? `{current|${value}}` : value
+        },
+        rich: {
+          current: {
+            color: '#4CAF50',
+            fontWeight: 'bold',
+            fontSize: 14
+          }
+        }
       }
-      return null
-    })
-
-    // 按顺序排列的算法列表（用于展示）
-    const comparisonAlgorithms = computed(() => {
-      if (!complexityComparison.value) return []
-      
-      const comp = complexityComparison.value
-      return [
-        comp.double_hotstuff,  // 当前系统，放在第一位
-        comp.hotstuff_pure,    // 传统 HotStuff
-        comp.pbft_multi_layer, // 双层 PBFT
-        comp.pbft_pure         // 传统 PBFT（最差，放在最后）
-      ]
-    })
-
-    // 计算最大消息数（用于进度条比例）
-    const maxMessages = computed(() => {
-      if (!comparisonAlgorithms.value || comparisonAlgorithms.value.length === 0) return 1
-      return Math.max(...comparisonAlgorithms.value.map(a => a.messages || 0), 1)
-    })
-
-    // 格式化数字（添加千位分隔符）
-    const formatNumber = (num) => {
-      if (num === null || num === undefined) return '0'
-      return num.toLocaleString('en-US')
-    }
-
-    // 计算进度条宽度（百分比）
-    const getProgressWidth = (messages) => {
-      if (!maxMessages.value || maxMessages.value === 0) return 0
-      return Math.min((messages / maxMessages.value) * 100, 100)
-    }
-
-    // 获取进度条样式类
-    const getProgressBarClass = (key) => {
-      if (key === 'double_hotstuff') return 'progress-current'
-      if (key === 'hotstuff_pure') return 'progress-hotstuff'
-      if (key === 'pbft_multi_layer') return 'progress-pbft-multi'
-      if (key === 'pbft_pure') return 'progress-pbft-pure'
-      return 'progress-default'
-    }
-
-    const getNodePhaseMessages = (nodeIndex, phase) => {
-      const msgs = props.simulationResult?.messages || []
-      if (!msgs || msgs.length === 0) return []
-
-      // 只展示该节点作为发送方的消息，按 phase 分类
-      return msgs.filter(msg => {
-        if (!msg) return false
-        const msgPhase = msg.phase
-        const isPhaseMatch = msgPhase === phase
-        const isFromNode = msg.src === nodeIndex
-        // 处理特殊目标（all, group_leaders, group_members）
-        const hasValidDst = msg.dst !== null && msg.dst !== undefined && 
-                           (typeof msg.dst === 'number' || 
-                            msg.dst === 'all' || 
-                            msg.dst === 'group_leaders' || 
-                            msg.dst === 'group_members')
-        return isPhaseMatch && isFromNode && hasValidDst
-      })
-    }
-
-    const msgKey = (msg) => {
-      if (!msg) return 'invalid-key'
-      return `${msg.src}-${msg.dst ?? 'null'}-${msg.type ?? 'msg'}-${msg.value}-${msg.weight || 0}`
-    }
-
-    const formatLabel = (msg) => {
-      const value = msg?.value
-      if (msg?.type === 'qc') {
-        const weight = msg.qc?.total_weight || msg.qc?.signers?.length
-        const isMultiLayer = msg.qc?.is_multi_layer
-        const suffix = isMultiLayer && weight ? ` (Weight: ${weight})` : ''
-        return `QC(${value})${suffix}`
+    },
+    series: [
+      {
+        type: 'bar',
+        data: seriesData,
+        barWidth: '60%',
+        animationDuration: 1000,
+        animationEasing: 'cubicOut'
       }
-      if (msg?.type === 'vote') {
-        return `VOTE(${value})`
+    ],
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: {
+        type: 'shadow'
+      },
+      formatter: (params) => {
+        const dataIndex = params[0].dataIndex
+        const algo = algorithms[algorithms.length - 1 - dataIndex]
+        let html = `<div style="font-weight: bold; margin-bottom: 8px;">${algo.name}</div>`
+        html += `<div>消息数量: <strong>${formatNumber(algo.messages)}</strong></div>`
+        html += `<div>复杂度: <code style="background: #f5f5f5; padding: 2px 6px; border-radius: 3px;">${algo.complexity}</code></div>`
+        if (algo.is_current) {
+          html += `<div style="color: #4CAF50; margin-top: 6px;">✅ 当前系统</div>`
+        } else if (algo.optimization_ratio) {
+          html += `<div style="color: #FF9800; margin-top: 6px;">⚡ ${algo.optimization_ratio.toFixed(1)}x 优化</div>`
+        }
+        return html
       }
-      if (msg?.type === 'pre_prepare' || msg?.type === 'proposal') {
-        return `PROPOSAL(${value})`
-      }
-      return `${msg?.type ?? 'MSG'}(${value})`
-    }
-
-    const formatDst = (dst) => {
-      if (typeof dst === 'number') return dst
-      if (dst === 'all') return 'All'
-      if (dst === 'group_leaders') return 'Group Leaders'
-      if (dst === 'group_members') return 'Group Members'
-      return dst || '?'
-    }
-
-    const isGroupVote = (msg) => {
-      // 检查是否为 GroupVote（聚合投票）
-      return msg?.is_group_vote === true || 
-             (msg?.type === 'vote' && msg?.weight > 1) ||
-             (msg?.type === 'qc' && msg?.qc?.is_multi_layer === true)
-    }
-
-    const getMsgClass = (msg) => {
-      if (msg?.type === 'qc') {
-        return 'qc-msg'
-      }
-      if (msg?.type === 'vote') {
-        return 'vote-msg'
-      }
-      if (msg?.type === 'pre_prepare' || msg?.type === 'proposal') {
-        return 'proposal-msg'
-      }
-      return 'other-msg'
-    }
-
-    return {
-      nodes,
-      complexityComparison,
-      comparisonAlgorithms,
-      maxMessages,
-      formatNumber,
-      getProgressWidth,
-      getProgressBarClass,
-      getNodePhaseMessages,
-      msgKey,
-      formatLabel,
-      formatDst,
-      isGroupVote,
-      getMsgClass
     }
   }
+})
+
+// 获取柱状图颜色
+const getBarColor = (index, isCurrent) => {
+  if (isCurrent) {
+    return {
+      type: 'linear',
+      x: 0,
+      y: 0,
+      x2: 1,
+      y2: 0,
+      colorStops: [
+        { offset: 0, color: '#4CAF50' },
+        { offset: 1, color: '#66BB6A' }
+      ]
+    }
+  }
+  
+  const colors = [
+    { start: '#2196F3', end: '#42A5F5' },  // hotstuff_pure
+    { start: '#FF9800', end: '#FFB74D' },  // pbft_multi_layer
+    { start: '#F44336', end: '#EF5350' }   // pbft_pure
+  ]
+  
+  const colorIndex = index % colors.length
+  return {
+    type: 'linear',
+    x: 0,
+    y: 0,
+    x2: 1,
+    y2: 0,
+    colorStops: [
+      { offset: 0, color: colors[colorIndex].start },
+      { offset: 1, color: colors[colorIndex].end }
+    ]
+  }
+}
+
+const formatNumber = (num) => {
+  if (num === null || num === undefined) return '0'
+  return num.toLocaleString('en-US')
+}
+
+// ========== Table 数据准备 ==========
+const tableData = computed(() => {
+  return nodes.value.map(nodeIndex => ({
+    node: nodeIndex,
+    prepare: getNodePhaseMessages(nodeIndex, 'prepare'),
+    preCommit: getNodePhaseMessages(nodeIndex, 'pre-commit'),
+    commit: getNodePhaseMessages(nodeIndex, 'commit'),
+    decide: getNodePhaseMessages(nodeIndex, 'decide')
+  }))
+})
+
+const getNodePhaseMessages = (nodeIndex, phase) => {
+  const msgs = props.simulationResult?.messages || []
+  if (!msgs || msgs.length === 0) return []
+
+  return msgs.filter(msg => {
+    if (!msg) return false
+    const msgPhase = msg.phase
+    const isPhaseMatch = msgPhase === phase
+    const isFromNode = msg.src === nodeIndex
+    const hasValidDst = msg.dst !== null && msg.dst !== undefined && 
+                       (typeof msg.dst === 'number' || 
+                        msg.dst === 'all' || 
+                        msg.dst === 'group_leaders' || 
+                        msg.dst === 'group_members')
+    return isPhaseMatch && isFromNode && hasValidDst
+  })
+}
+
+// ========== 消息处理函数 ==========
+const msgKey = (msg) => {
+  if (!msg) return 'invalid-key'
+  return `${msg.src}-${msg.dst ?? 'null'}-${msg.type ?? 'msg'}-${msg.value}-${msg.weight || 0}`
+}
+
+const formatLabel = (msg) => {
+  const value = msg?.value
+  if (msg?.type === 'qc') {
+    const weight = msg.qc?.total_weight || msg.qc?.signers?.length
+    const isMultiLayer = msg.qc?.is_multi_layer
+    const suffix = isMultiLayer && weight ? ` (Weight: ${weight})` : ''
+    return `QC(${value})${suffix}`
+  }
+  if (msg?.type === 'vote') {
+    return `VOTE(${value})`
+  }
+  if (msg?.type === 'pre_prepare' || msg?.type === 'proposal') {
+    return `PROPOSAL(${value})`
+  }
+  return `${msg?.type ?? 'MSG'}(${value})`
+}
+
+const formatDst = (dst) => {
+  if (typeof dst === 'number') return dst
+  if (dst === 'all') return 'All'
+  if (dst === 'group_leaders') return 'Group Leaders'
+  if (dst === 'group_members') return 'Group Members'
+  return dst || '?'
+}
+
+const isGroupVote = (msg) => {
+  return msg?.is_group_vote === true || 
+         (msg?.type === 'vote' && msg?.weight > 1) ||
+         (msg?.type === 'qc' && msg?.qc?.is_multi_layer === true)
+}
+
+// Element Plus Tag 类型映射
+const getTagType = (msg) => {
+  if (msg?.type === 'qc') return 'success'
+  if (msg?.type === 'vote') return 'warning'
+  if (msg?.type === 'pre_prepare' || msg?.type === 'proposal') return 'primary'
+  return 'info'
 }
 </script>
 
 <style scoped>
 .hotstuff-table-container {
   width: 100%;
-  max-width: 1000px;
+  max-width: 1200px;
   margin: 0 auto;
 }
 
-/* 复杂度对比面板样式 */
-.complexity-panel {
+/* Card Header 样式 */
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 18px;
+  font-weight: bold;
+  color: #303133;
+}
+
+.header-icon {
+  color: #409eff;
+}
+
+.header-title {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  border-radius: 12px;
-  padding: 25px;
-  margin-bottom: 30px;
-  color: white;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
-.complexity-panel h3 {
-  margin: 0 0 20px 0;
-  font-size: 1.4rem;
-  text-align: center;
-  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+/* 复杂度对比面板 */
+.complexity-panel {
+  margin-bottom: 24px;
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.05) 0%, rgba(118, 75, 162, 0.05) 100%);
 }
 
-.comparison-table {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 20px;
-  margin-bottom: 20px;
-}
-
-.algorithm-card {
-  background: rgba(255, 255, 255, 0.15);
-  backdrop-filter: blur(10px);
-  border-radius: 12px;
-  padding: 18px;
-  border: 2px solid rgba(255, 255, 255, 0.2);
-  transition: all 0.3s ease;
-}
-
-.algorithm-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-}
-
-.algorithm-card.current-system {
-  background: linear-gradient(135deg, rgba(76, 175, 80, 0.3), rgba(56, 142, 60, 0.3));
-  border: 3px solid #4CAF50;
-  box-shadow: 0 0 20px rgba(76, 175, 80, 0.5);
-}
-
-.algorithm-header {
+.panel-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  margin-bottom: 15px;
-  flex-wrap: wrap;
   gap: 8px;
-}
-
-.algorithm-name {
-  font-size: 1.1rem;
+  font-size: 16px;
   font-weight: bold;
-  flex: 1;
-  min-width: 0;
+  color: #606266;
 }
 
-.current-badge {
-  background: linear-gradient(135deg, #4CAF50, #45a049);
-  color: white;
-  padding: 4px 10px;
-  border-radius: 12px;
-  font-size: 0.75rem;
-  font-weight: bold;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-}
-
-.optimization-badge {
-  background: linear-gradient(135deg, #FFD700, #FFA500);
-  color: #333;
-  padding: 4px 10px;
-  border-radius: 12px;
-  font-size: 0.75rem;
-  font-weight: bold;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-}
-
-.algorithm-stats {
-  margin-bottom: 15px;
-}
-
-.stat-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-  font-size: 0.9rem;
-}
-
-.stat-label {
-  opacity: 0.9;
-}
-
-.stat-value {
-  font-weight: bold;
-  font-size: 1rem;
-}
-
-.stat-value.complexity {
-  font-family: 'Courier New', monospace;
-  background: rgba(0, 0, 0, 0.2);
-  padding: 2px 8px;
-  border-radius: 4px;
-}
-
-/* 进度条样式 */
-.progress-container {
-  margin-top: 12px;
-}
-
-.progress-bar-wrapper {
+/* ECharts 容器 */
+.chart-container {
   width: 100%;
-  height: 32px;
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 16px;
-  overflow: hidden;
-  position: relative;
-  border: 1px solid rgba(255, 255, 255, 0.3);
+  height: 300px;
+  margin: 20px 0;
 }
 
-.progress-bar {
+.complexity-chart {
+  width: 100%;
   height: 100%;
+}
+
+/* 底部说明 */
+.comparison-note {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  padding-right: 8px;
-  transition: width 0.8s ease;
-  border-radius: 16px;
-  position: relative;
-  min-width: 60px;
-}
-
-.progress-current {
-  background: linear-gradient(90deg, #4CAF50, #66BB6A);
-  box-shadow: 0 0 10px rgba(76, 175, 80, 0.6);
-}
-
-.progress-hotstuff {
-  background: linear-gradient(90deg, #2196F3, #42A5F5);
-}
-
-.progress-pbft-multi {
-  background: linear-gradient(90deg, #FF9800, #FFB74D);
-}
-
-.progress-pbft-pure {
-  background: linear-gradient(90deg, #F44336, #EF5350);
-}
-
-.progress-text {
-  color: white;
-  font-size: 0.75rem;
-  font-weight: bold;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
-  white-space: nowrap;
-}
-
-.comparison-note {
-  font-size: 0.95rem;
-  opacity: 0.95;
-  text-align: center;
-  padding-top: 15px;
-  border-top: 1px solid rgba(255, 255, 255, 0.3);
-  line-height: 1.6;
-}
-
-.hotstuff-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 10px;
+  gap: 8px;
+  padding: 16px;
+  background: #f0f9ff;
+  border-left: 4px solid #409eff;
+  border-radius: 4px;
   font-size: 14px;
+  color: #606266;
+  line-height: 1.6;
+  margin-top: 16px;
 }
 
-.hotstuff-table th,
-.hotstuff-table td {
-  border: 1px solid #ccc;
-  padding: 6px 8px;
-  text-align: left;
-  vertical-align: top;
+.comparison-note strong {
+  color: #303133;
 }
 
-.hotstuff-table th {
-  background: #f5f7fa;
+/* 消息日志面板 */
+.message-log-panel {
+  margin-top: 24px;
 }
 
-.col-tip {
-  display: block;
+/* Phase Header */
+.phase-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.phase-tip {
   font-size: 11px;
   color: #909399;
   font-weight: normal;
 }
 
-.msg-line {
-  white-space: nowrap;
-  margin-bottom: 4px;
-  padding: 2px 4px;
-  border-radius: 4px;
+/* 消息列表 */
+.message-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 24px;
 }
 
-.msg-line.group-vote {
-  background: linear-gradient(90deg, rgba(255, 215, 0, 0.2), rgba(255, 215, 0, 0.1));
-  border-left: 3px solid #FFD700;
-  font-weight: bold;
+.message-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.message-tag {
+  cursor: default;
+  user-select: none;
+  transition: all 0.3s ease;
+}
+
+.message-tag:hover {
+  transform: translateX(2px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
 .msg-label {
-  margin-left: 4px;
-}
-
-.group-vote-badge {
-  display: inline-block;
-  margin-left: 8px;
-  padding: 2px 6px;
-  background: linear-gradient(135deg, #FFD700, #FFA500);
-  color: #333;
-  border-radius: 12px;
-  font-size: 0.75rem;
-  font-weight: bold;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-}
-
-.proposal-msg {
-  color: #409eff;
   font-weight: 600;
 }
 
-.qc-msg {
-  color: #67c23a;
-  font-weight: 600;
+.group-badge {
+  animation: pulse 2s ease-in-out infinite;
 }
 
-.vote-msg {
-  color: #e6a23c;
-  font-weight: 600;
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.8;
+  }
 }
 
-.other-msg {
-  color: #606266;
-}
-
-.no-data {
-  margin-top: 10px;
-  text-align: center;
-  color: #909399;
+/* 响应式调整 */
+@media (max-width: 768px) {
+  .chart-container {
+    height: 250px;
+  }
+  
+  .card-header {
+    font-size: 16px;
+  }
+  
+  .panel-header {
+    font-size: 14px;
+  }
 }
 </style>
-
-

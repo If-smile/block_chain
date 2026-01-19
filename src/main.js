@@ -3,6 +3,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
+import { autoAnimatePlugin } from '@formkit/auto-animate/vue'
 import App from './App.vue'
 
 // 导入页面组件
@@ -31,4 +32,5 @@ for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
 
 app.use(router)
 app.use(ElementPlus)
+app.use(autoAnimatePlugin)  // 注册 auto-animate 全局指令
 app.mount('#app') 

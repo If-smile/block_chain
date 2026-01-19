@@ -1,17 +1,76 @@
 <template>
-  <div class="canvas-container">
-    <canvas ref="canvas" width="800" height="700"></canvas>
-    <div class="consensus-result" v-if="finalConsensus">
-      <h3>最终共识结果</h3>
-      <p>{{ finalConsensus }}</p>
+  <el-card class="topology-container" shadow="hover">
+    <!-- Card Header with Icon and Legend -->
+    <template #header>
+      <div class="topology-header">
+        <div class="header-left">
+          <el-icon :size="24" class="header-icon">
+            <Connection />
+          </el-icon>
+          <span class="header-title">网络拓扑实时监控</span>
+        </div>
+        
+        <!-- Node Status Legend -->
+        <div class="legend-container">
+          <div class="legend-item">
+            <span class="legend-dot root-dot"></span>
+            <span class="legend-label">Root Leader</span>
+          </div>
+          <div class="legend-item">
+            <span class="legend-dot group-leader-dot"></span>
+            <span class="legend-label">Group Leader</span>
+          </div>
+          <div class="legend-item">
+            <span class="legend-dot member-dot"></span>
+            <span class="legend-label">Member</span>
+          </div>
+          <div class="legend-item">
+            <span class="legend-dot byzantine-dot"></span>
+            <span class="legend-label">Byzantine</span>
+          </div>
+        </div>
+      </div>
+    </template>
+    
+    <!-- Canvas Container -->
+    <div class="canvas-wrapper">
+      <canvas ref="canvas" width="800" height="700"></canvas>
+      
+      <!-- Consensus Result Overlay with Transition -->
+      <transition name="el-fade-in">
+        <div v-if="finalConsensus" class="result-overlay">
+          <el-result
+            icon="success"
+            title="共识达成"
+            :sub-title="`决议值: ${finalConsensus}`"
+            class="consensus-result"
+          >
+            <template #icon>
+              <el-icon class="result-icon" :size="80">
+                <SuccessFilled />
+              </el-icon>
+            </template>
+            <template #extra>
+              <el-tag type="success" size="large" effect="dark">
+                ✓ 网络已完成一致性确认
+              </el-tag>
+            </template>
+          </el-result>
+        </div>
+      </transition>
     </div>
-  </div>
+  </el-card>
 </template>
 
 <script>
 import { ref, computed, onMounted, watch } from "vue";
+import { Connection, SuccessFilled } from '@element-plus/icons-vue';
 
 export default {
+  components: {
+    Connection,
+    SuccessFilled
+  },
   props: ["topologyType", "nodeCount", "byzantineNodes", "simulationResult", "proposalValue", "currentLeader", "branchCount"],
   setup(props) {
     const canvas = ref(null);
@@ -348,18 +407,232 @@ export default {
 };
 </script>
 
-<style>
-.canvas-container {
+<style scoped>
+/* ========== 容器样式 ========== */
+.topology-container {
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+/* ========== Header 样式 ========== */
+.topology-header {
   display: flex;
-  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.header-icon {
+  color: #409eff;
+}
+
+.header-title {
+  font-size: 18px;
+  font-weight: bold;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ========== 图例样式 ========== */
+.legend-container {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #606266;
+  transition: all 0.3s ease;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.legend-item:hover {
+  background: rgba(64, 158, 255, 0.1);
+  transform: translateY(-1px);
+}
+
+.legend-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid #333;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  flex-shrink: 0;
+}
+
+.root-dot {
+  background: #FFD700;
+  animation: pulse-gold 2s ease-in-out infinite;
+}
+
+.group-leader-dot {
+  background: #4169E1;
+}
+
+.member-dot {
+  background: #32CD32;
+}
+
+.byzantine-dot {
+  background: #F44336;
+  animation: pulse-red 2s ease-in-out infinite;
+}
+
+@keyframes pulse-gold {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(255, 215, 0, 0.7);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(255, 215, 0, 0);
+  }
+}
+
+@keyframes pulse-red {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(244, 67, 54, 0.7);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(244, 67, 54, 0);
+  }
+}
+
+.legend-label {
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* ========== Canvas 容器 ========== */
+.canvas-wrapper {
+  position: relative;
+  display: flex;
+  justify-content: center;
   align-items: center;
   background: #f9f9f9;
   border-radius: 8px;
-  padding: 10px;
+  padding: 20px;
+  min-height: 740px;
 }
+
 canvas {
-  border: 1px solid #e0e0e0;
+  border: 2px solid #e0e0e0;
   background: white;
-  box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
+  box-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.08);
+  border-radius: 4px;
+  transition: box-shadow 0.3s ease;
+}
+
+canvas:hover {
+  box-shadow: 0 6px 24px 0 rgba(0, 0, 0, 0.12);
+}
+
+/* ========== 共识结果覆盖层 ========== */
+.result-overlay {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 100;
+  background: rgba(255, 255, 255, 0.98);
+  backdrop-filter: blur(10px);
+  border-radius: 16px;
+  padding: 40px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  border: 2px solid #67c23a;
+  min-width: 400px;
+  text-align: center;
+}
+
+.consensus-result {
+  margin: 0;
+}
+
+.result-icon {
+  color: #67c23a;
+  animation: scale-in 0.5s ease-out;
+}
+
+@keyframes scale-in {
+  0% {
+    transform: scale(0);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.1);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Element Plus Result 组件样式覆盖 */
+.consensus-result :deep(.el-result__title) {
+  font-size: 24px;
+  font-weight: bold;
+  color: #303133;
+  margin-top: 16px;
+}
+
+.consensus-result :deep(.el-result__subtitle) {
+  font-size: 16px;
+  color: #606266;
+  margin-top: 8px;
+}
+
+.consensus-result :deep(.el-result__extra) {
+  margin-top: 24px;
+}
+
+/* ========== 响应式设计 ========== */
+@media (max-width: 900px) {
+  .topology-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  
+  .legend-container {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  
+  .canvas-wrapper {
+    overflow-x: auto;
+  }
+  
+  .result-overlay {
+    min-width: 320px;
+    padding: 24px;
+  }
+}
+
+@media (max-width: 500px) {
+  .header-title {
+    font-size: 16px;
+  }
+  
+  .legend-item {
+    font-size: 12px;
+  }
+  
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+  }
 }
 </style>

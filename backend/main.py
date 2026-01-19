@@ -2027,7 +2027,7 @@ async def finalize_consensus(session_id: str, status: str = "共识完成", desc
     # 更新阶段
     await sio.emit('phase_update', {
         "phase": "completed",
-        "step": 3,
+        "step": 4,  # Fix: Set to 4 to match frontend 100% progress
         "isMyTurn": False
     }, room=session_id)
     

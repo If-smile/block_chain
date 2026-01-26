@@ -2,52 +2,52 @@
   <div class="join-page">
     <el-container>
       <el-header class="header">
-        <h1>自动分配节点</h1>
-        <p>扫描二维码或输入会话ID加入共识过程</p>
+        <h1>Auto-Assign Node</h1>
+        <p>Scan QR code or enter Session ID to join consensus</p>
       </el-header>
       
       <el-main class="main-content">
         <el-card class="join-card">
           <template #header>
             <div class="card-header">
-                  <span>会话信息</span>
+                  <span>Session Info</span>
             </div>
           </template>
           
           <div v-if="sessionInfo" class="session-details">
             <el-descriptions :column="2" border>
-              <el-descriptions-item label="会话ID">{{ sessionInfo.sessionId }}</el-descriptions-item>
-              <el-descriptions-item label="总节点数">{{ sessionInfo.nodeCount }}</el-descriptions-item>
-              <el-descriptions-item label="故障节点数">{{ sessionInfo.faultyNodes }}</el-descriptions-item>
-              <el-descriptions-item label="拓扑结构">{{ getTopologyName(sessionInfo.topology) }}</el-descriptions-item>
-              <el-descriptions-item label="提议值">{{ sessionInfo.proposalValue }}</el-descriptions-item>
-              <el-descriptions-item label="状态">{{ sessionInfo.status }}</el-descriptions-item>
+              <el-descriptions-item label="Session ID">{{ sessionInfo.sessionId }}</el-descriptions-item>
+              <el-descriptions-item label="Total Nodes">{{ sessionInfo.nodeCount }}</el-descriptions-item>
+              <el-descriptions-item label="Faulty Nodes">{{ sessionInfo.faultyNodes }}</el-descriptions-item>
+              <el-descriptions-item label="Topology">{{ getTopologyName(sessionInfo.topology) }}</el-descriptions-item>
+              <el-descriptions-item label="Proposal Value">{{ sessionInfo.proposalValue }}</el-descriptions-item>
+              <el-descriptions-item label="Status">{{ sessionInfo.status }}</el-descriptions-item>
             </el-descriptions>
             
             <div class="auto-assign-section">
               <div class="assign-info">
-                <h3>自动节点分配</h3>
-                <p>系统将自动为您分配一个可用节点，无需手动选择。</p>
+                <h3>Auto Node Assignment</h3>
+                <p>The system will auto-assign an available node; no manual selection needed.</p>
                 
                 <div class="session-stats">
                   <el-row :gutter="20">
                     <el-col :span="12">
                       <div class="stat-item">
                         <div class="stat-number">{{ sessionInfo.nodeCount }}</div>
-                        <div class="stat-label">总节点数</div>
+                        <div class="stat-label">Total Nodes</div>
                       </div>
                     </el-col>
                     <el-col :span="12">
                       <div class="stat-item">
                         <div class="stat-number">{{ connectedNodes.length }}</div>
-                        <div class="stat-label">已连接节点</div>
+                        <div class="stat-label">Connected Nodes</div>
                       </div>
                     </el-col>
                   </el-row>
                 </div>
                 
                 <div class="available-nodes">
-                  <h4>节点状态</h4>
+                  <h4>Node Status</h4>
                   <div class="nodes-grid">
                     <div 
                       v-for="i in sessionInfo.nodeCount" 
@@ -66,7 +66,7 @@
                           :type="connectedNodes.includes(i-1) ? 'success' : 'info'" 
                           size="small"
                         >
-                          {{ connectedNodes.includes(i-1) ? '已占用' : '可用' }}
+                          {{ connectedNodes.includes(i-1) ? 'Occupied' : 'Available' }}
                         </el-tag>
                       </div>
                     </div>
@@ -82,14 +82,14 @@
                   :loading="joining"
                   :disabled="sessionInfo.nodeCount === connectedNodes.length"
                 >
-                  {{ sessionInfo.nodeCount === connectedNodes.length ? '所有节点已占用' : '自动分配并加入' }}
+                  {{ sessionInfo.nodeCount === connectedNodes.length ? 'All nodes occupied' : 'Auto-assign & Join' }}
                 </el-button>
                 
                 <el-button 
                   size="large" 
                   @click="goBack"
                 >
-                  返回
+                  Back
                 </el-button>
               </div>
             </div>
@@ -124,27 +124,27 @@ export default {
     
     const getTopologyName = (topology) => {
       const names = {
-        full: '全连接',
-        ring: '环形',
-        star: '星形',
-        tree: '树形'
+        full: 'Full Mesh',
+        ring: 'Ring',
+        star: 'Star',
+        tree: 'Tree'
       }
       return names[topology] || topology
     }
     
     const getNodeRole = (nodeId) => {
-      if (nodeId === 0) return '提议者'
-      return '验证者'
+      if (nodeId === 0) return 'Proposer'
+      return 'Validator'
     }
     
     const getNodePermissions = (nodeId) => {
-      if (nodeId === 0) return '发起提议，参与共识'
-      return '参与共识，投票'
+      if (nodeId === 0) return 'Propose and participate in consensus'
+      return 'Participate in consensus and vote'
     }
     
     const getNodeResponsibilities = (nodeId) => {
-      if (nodeId === 0) return '发起共识提议，协调其他节点'
-      return '验证提议，发送准备和提交消息'
+      if (nodeId === 0) return 'Initiate proposals, coordinate nodes'
+      return 'Verify proposals, send prepare and commit messages'
     }
     
     const autoAssignAndJoin = async () => {
@@ -154,15 +154,15 @@ export default {
         const response = await axios.post(`/api/sessions/${sessionId}/assign-node`)
         const { nodeId } = response.data
         
-        ElMessage.success(`已分配节点 ${nodeId}`)
+        ElMessage.success(`Assigned node ${nodeId}`)
         
         // Navigate to node page
         router.push(`/node/${sessionId}/${nodeId}`)
       } catch (error) {
         if (error.response?.status === 409) {
-          ElMessage.error('所有节点已占用，请稍后重试')
+          ElMessage.error('All nodes occupied, please try again later')
         } else {
-          ElMessage.error('分配节点失败，请重试')
+          ElMessage.error('Failed to assign node, please retry')
         }
       } finally {
         joining.value = false
@@ -188,7 +188,7 @@ export default {
         // Get connected nodes
         await loadConnectedNodes()
       } catch (error) {
-        ElMessage.error('加载会话信息失败')
+        ElMessage.error('Failed to load session info')
         router.push('/')
       }
     }

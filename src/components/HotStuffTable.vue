@@ -6,7 +6,7 @@
         <el-icon :size="24" class="header-icon">
           <DataAnalysis />
         </el-icon>
-        <span class="header-title">HotStuff 共识阶段分析</span>
+        <span class="header-title">Consensus Metrics Dashboard</span>
       </div>
     </template>
     
@@ -17,7 +17,7 @@
           <el-icon :size="20">
             <TrendCharts />
           </el-icon>
-          <span>共识算法通信复杂度对比</span>
+          <span>Comm. Complexity Comparison</span>
         </div>
       </template>
       
@@ -33,9 +33,9 @@
       <!-- 底部说明 -->
       <div class="comparison-note">
         <el-icon><InfoFilled /></el-icon>
-        <strong>双层 HotStuff 优势：</strong>
-        通过分组聚合，Global Leader 只需处理 K 个 GroupVote，
-        而不是 N 个单独投票，通信复杂度显著降低
+        <strong>Double-Layer HotStuff advantage:</strong>
+        Through group aggregation, Global Leader processes K GroupVotes
+        instead of N individual votes, significantly reducing communication complexity.
       </div>
     </el-card>
     
@@ -46,7 +46,7 @@
           <el-icon :size="20">
             <List />
           </el-icon>
-          <span>节点消息流转记录</span>
+          <span>Phase Message Audit Log</span>
         </div>
       </template>
       
@@ -57,7 +57,7 @@
         style="width: 100%"
         :header-cell-style="{ background: '#f5f7fa', fontWeight: 'bold' }"
       >
-        <el-table-column prop="node" label="节点" width="80" align="center" />
+        <el-table-column prop="node" label="Node ID" width="80" align="center" />
         
         <el-table-column label="Prepare" min-width="200">
           <template #header>
@@ -209,7 +209,7 @@
       </el-table>
     </el-card>
     
-    <el-empty v-else description="暂无历史数据" :image-size="120" />
+    <el-empty v-else description="No history data, please run consensus" :image-size="120" />
   </el-card>
 </template>
 
@@ -328,7 +328,7 @@ const chartOption = computed(() => {
     },
     xAxis: {
       type: 'value',
-      name: '消息数量',
+      name: 'Message Count',
       nameTextStyle: {
         fontSize: 12,
         color: '#666'
@@ -374,12 +374,12 @@ const chartOption = computed(() => {
         const dataIndex = params[0].dataIndex
         const algo = algorithms[algorithms.length - 1 - dataIndex]
         let html = `<div style="font-weight: bold; margin-bottom: 8px;">${algo.name}</div>`
-        html += `<div>消息数量: <strong>${formatNumber(algo.messages)}</strong></div>`
-        html += `<div>复杂度: <code style="background: #f5f5f5; padding: 2px 6px; border-radius: 3px;">${algo.complexity}</code></div>`
+        html += `<div>Message Count: <strong>${formatNumber(algo.messages)}</strong></div>`
+        html += `<div>Complexity: <code style="background: #f5f5f5; padding: 2px 6px; border-radius: 3px;">${algo.complexity}</code></div>`
         if (algo.is_current) {
-          html += `<div style="color: #4CAF50; margin-top: 6px;">✅ 当前系统</div>`
+          html += `<div style="color: #4CAF50; margin-top: 6px;">✅ Current system</div>`
         } else if (algo.optimization_ratio) {
-          html += `<div style="color: #FF9800; margin-top: 6px;">⚡ ${algo.optimization_ratio.toFixed(1)}x 优化</div>`
+          html += `<div style="color: #FF9800; margin-top: 6px;">⚡ ${algo.optimization_ratio.toFixed(1)}x optimization</div>`
         }
         return html
       }

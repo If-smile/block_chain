@@ -7,7 +7,7 @@
           <el-icon :size="24" class="header-icon">
             <Connection />
           </el-icon>
-          <span class="header-title">网络拓扑实时监控</span>
+          <span class="header-title">Network Topology Monitor</span>
         </div>
         
         <!-- Node Status Legend -->
@@ -41,8 +41,8 @@
         <div v-if="finalConsensus" class="result-overlay">
           <el-result
             icon="success"
-            title="共识达成"
-            :sub-title="`决议值: ${finalConsensus}`"
+            title="Consensus Reached"
+            :sub-title="`Final Value: ${finalConsensus}`"
             class="consensus-result"
           >
             <template #icon>
@@ -52,7 +52,7 @@
             </template>
             <template #extra>
               <el-tag type="success" size="large" effect="dark">
-                ✓ 网络已完成一致性确认
+                ✓ Network consensus confirmed
               </el-tag>
             </template>
           </el-result>
@@ -365,7 +365,7 @@ export default {
 
     const playSequence = (seq, idx) => {
         if(!seq || idx >= seq.length) {
-            finalConsensus.value = props.simulationResult?.consensus || "完成";
+            finalConsensus.value = props.simulationResult?.consensus || "Completed";
             return;
         }
         runAnimation(seq[idx], () => playSequence(seq, idx+1));

@@ -1,5 +1,18 @@
 <template>
   <div class="terminal-page">
+    <!-- View Change Overlay -->
+    <transition name="fade">
+      <div v-if="isViewChanging" class="view-transition-overlay">
+        <div class="view-change-card">
+          <el-icon :size="60" class="view-change-icon">
+            <Refresh />
+          </el-icon>
+          <h2 class="view-change-title">Switching to VIEW {{ currentView }}</h2>
+          <p class="view-change-subtitle">{{ viewChangeReason }}</p>
+        </div>
+      </div>
+    </transition>
+    
     <!-- Terminal Header -->
     <div class="terminal-header">
       <div class="header-left">
@@ -25,7 +38,12 @@
           {{ connectionStatus === 'connected' ? 'ONLINE' : 'OFFLINE' }}
         </el-tag>
         
-        <el-tag type="info" effect="dark" size="large">
+        <el-tag 
+          :type="isViewChanging ? 'danger' : 'info'" 
+          effect="dark" 
+          size="large"
+          :class="{ 'view-tag-blink': isViewChanging }"
+        >
           <el-icon><View /></el-icon>
           VIEW {{ currentView }}
         </el-tag>
@@ -222,7 +240,7 @@
         <div class="audit-log">
           <div class="log-header">
             <div class="header-line"></div>
-            <span class="log-title">AUDIT LOG</span>
+            <span class="log-title">TERMINAL AUDIT LOG</span>
             <div class="log-actions">
               <el-button 
                 size="small" 
@@ -276,7 +294,8 @@ import {
   WarnTriangleFilled,
   Warning,
   Delete,
-  Document
+  Document,
+  Refresh
 } from '@element-plus/icons-vue'
 import io from 'socket.io-client'
 
@@ -315,6 +334,13 @@ const waitingForNextRound = ref(true)
 const proposalInput = ref('')
 const logContainer = ref(null)
 const auditLogs = ref([])
+
+// View Change state
+const isViewChanging = ref(false)
+const viewChangeReason = ref('')
+const previousView = ref(0)
+const previousPhaseStep = ref(0)
+let viewChangeTimer = null
 
 // Computed
 const isLeader = computed(() => nodeId === currentLeaderId.value)
@@ -430,10 +456,11 @@ const connectToServer = () => {
   })
 
   socket.value.on('consensus_result', (result) => {
-    const logType = result.status === '共识成功' ? 'info' : 'error'
+    const isSuccess = result.status === 'Consensus Success' || result.status === 'Consensus Reached'
+    const logType = isSuccess ? 'info' : 'error'
     addLog(logType, `🎯 Consensus Result: ${result.status} - ${result.description}`)
     
-    if (result.status === '共识成功') {
+    if (isSuccess) {
       ElMessage.success(`Consensus: ${result.description}`)
     } else {
       ElMessage.error(`Consensus Failed: ${result.description}`)
@@ -575,13 +602,71 @@ const getAcceptedContentDisplay = () => {
   return acceptedValue.value === 0 ? 'Option A' : 'Option B'
 }
 
+// Watch for view changes
+watch(currentView, (newView, oldView) => {
+  // 跳过初始化（从 undefined 或 0 到 0）
+  if (oldView === undefined || (oldView === 0 && newView === 0 && previousView.value === 0)) {
+    previousView.value = newView
+    previousPhaseStep.value = phaseStep.value
+    return
+  }
+  
+  // 如果视图发生变化
+  if (newView !== oldView && oldView !== undefined) {
+    // 清除之前的定时器
+    if (viewChangeTimer) {
+      clearTimeout(viewChangeTimer)
+    }
+    
+    // 判断视图切换的原因
+    // 如果 phaseStep 从非 0 变为 0，说明是新轮次开始
+    // 如果 phaseStep 不为 0 且视图变化，说明是超时触发的视图切换
+    if (phaseStep.value === 0 && previousPhaseStep.value === 0) {
+      // 新轮次开始（phaseStep 重置为 0）
+      viewChangeReason.value = 'New Consensus Round Started'
+    } else if (phaseStep.value > 0) {
+      // 共识过程中触发（可能是超时）
+      viewChangeReason.value = '⚠️ Consensus Timeout - Liveness Triggered'
+    } else {
+      // 其他情况（从非 0 变为 0）
+      viewChangeReason.value = 'New Consensus Round Started'
+    }
+    
+    // 显示视图切换通知
+    isViewChanging.value = true
+    previousView.value = oldView
+    
+    // 添加日志
+    addLog('warn', `🔄 View Change: ${oldView} → ${newView} (${viewChangeReason.value})`)
+    
+    // 3秒后隐藏通知
+    viewChangeTimer = setTimeout(() => {
+      isViewChanging.value = false
+      viewChangeReason.value = ''
+    }, 3000)
+  }
+  
+  previousView.value = newView
+  previousPhaseStep.value = phaseStep.value
+})
+
+// Also watch phaseStep to track changes
+watch(phaseStep, (newStep) => {
+  previousPhaseStep.value = newStep
+})
+
 // Lifecycle
 onMounted(() => {
   connectToServer()
   addLog('info', `🚀 Terminal initialized for Node ${nodeId}`)
+  previousView.value = currentView.value
+  previousPhaseStep.value = phaseStep.value
 })
 
 onUnmounted(() => {
+  if (viewChangeTimer) {
+    clearTimeout(viewChangeTimer)
+  }
   if (socket.value) {
     socket.value.disconnect()
   }
@@ -928,6 +1013,83 @@ onUnmounted(() => {
 
 .log-content::-webkit-scrollbar-thumb:hover {
   background: #5a5a5a;
+}
+
+/* ========== View Change Overlay ========== */
+.view-transition-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  backdrop-filter: blur(4px);
+}
+
+.view-change-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 50px 40px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  max-width: 500px;
+  width: 90%;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+}
+
+.view-change-icon {
+  color: #f56c6c;
+  animation: rotate 2s linear infinite;
+  margin-bottom: 10px;
+}
+
+.view-change-title {
+  font-size: 24px;
+  font-weight: 700;
+  color: #f56c6c;
+  margin: 0;
+  line-height: 1.4;
+}
+
+.view-change-subtitle {
+  font-size: 16px;
+  color: #606266;
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* View Tag Blink Animation */
+.view-tag-blink {
+  animation: view-tag-blink 1s ease-in-out infinite;
+}
+
+@keyframes view-tag-blink {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(245, 108, 108, 0.7);
+  }
+  50% {
+    transform: scale(1.1);
+    box-shadow: 0 0 0 8px rgba(245, 108, 108, 0);
+  }
+}
+
+/* Fade Transition */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
 }
 
 /* ========== Responsive ========== */

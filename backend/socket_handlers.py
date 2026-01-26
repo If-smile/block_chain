@@ -1294,6 +1294,10 @@ async def finalize_consensus(session_id: str, status: str = "Consensus Completed
     # 如果需要继续共识，应该通过 New-View 机制开始新的 View
     # 这里我们保持会话状态为 completed，不再自动启动下一轮
     print(f"View {session['current_view']} 共识完成，会话状态设为 completed")
+    
+    # 开启自动多轮演示模式：10秒后开始下一轮
+    print(f"当前轮次共识完成，10秒后自动开始下一轮...")
+    asyncio.create_task(start_next_round(session_id))
 
 async def handle_consensus_timeout(session_id: str, view: int):
     """

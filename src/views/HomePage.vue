@@ -324,10 +324,10 @@
               :topologyType="sessionInfo?.config?.topology || formData.topology"
               :nodeCount="sessionInfo?.config?.nodeCount || formData.nodeCount"
               :byzantineNodes="sessionInfo?.config?.faultyNodes || formData.faultyNodes"
-              :simulationResult="currentSimulation"
-              :proposalValue="sessionInfo?.config?.proposalValue || formData.proposalValue"
-              :currentLeader="demoLeader"
               :branchCount="sessionInfo?.config?.branchCount || formData.branchCount"
+              :proposalValue="sessionInfo?.config?.proposalValue || formData.proposalValue"
+              :simulationResult="currentSimulation"
+              :currentLeader="demoLeader"
             />
           </div>
           
@@ -335,7 +335,7 @@
             <HotStuffTable
               v-if="currentSimulation"
               :simulationResult="currentSimulation"
-              :nodeCount="formData.nodeCount"
+              :nodeCount="sessionInfo?.config?.nodeCount || formData.nodeCount"
             />
           </div>
         </div>
@@ -392,10 +392,10 @@ export default {
     const topologyRef = ref(null)
     
     const formData = reactive({
-      nodeCount: 6,
+      nodeCount: 20,
       faultyNodes: 1,
       topology: 'full',
-      branchCount: 2,
+      branchCount: 4,
       proposalValue: 0,
       proposalContent: '',
       maliciousProposer: false,

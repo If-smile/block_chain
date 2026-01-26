@@ -104,7 +104,7 @@ def create_session(config: SessionConfig) -> SessionInfo:
         "phase": "waiting",
         "phase_step": 0,
         "current_view": 0,   # 当前视图编号（HotStuff，View 即时钟，核心逻辑使用此字段）
-        # 注意：current_round 仅用于前端兼容，是 current_view 的别名，核心共识逻辑完全不依赖它
+        "current_round": 1,  # 当前轮次编号（用于消息标记和历史回放，从1开始）
         "leader_id": 0,      # 当前视图的Leader ID
         "connected_nodes": [],
         "robot_nodes": [],  # 机器人节点列表
@@ -288,6 +288,7 @@ async def send_prepare(sid, data):
     target_sid = node_sockets.get(session_id, {}).get(target_id)
     
     # 构造投票（VOTE）消息，发送给上级（Group Leader 或 Global Leader）
+    current_round = session.get("current_round", 1)
     vote_message = {
         "from": node_id,
         "to": target_id,
@@ -295,7 +296,7 @@ async def send_prepare(sid, data):
         "value": value,
         "phase": "prepare",
         "view": current_view,
-        "round": current_view,  # 兼容前端：round 与 view 相同（HotStuff 不使用 round）
+        "round": current_round,  # 使用当前轮次标记消息
         "qc": data.get("qc"),
         "timestamp": datetime.now().isoformat(),
         "tampered": False,
@@ -344,6 +345,7 @@ async def send_commit(sid, data):
     target_sid = node_sockets.get(session_id, {}).get(target_id)
     
     # 构造投票（VOTE）消息，发送给上级（Group Leader 或 Global Leader）
+    current_round = session.get("current_round", 1)
     vote_message = {
         "from": node_id,
         "to": target_id,
@@ -351,7 +353,7 @@ async def send_commit(sid, data):
         "value": value,
         "phase": "commit",
         "view": current_view,
-        "round": current_view,  # 兼容前端：round 与 view 相同（HotStuff 不使用 round）
+        "round": current_round,  # 使用当前轮次标记消息
         "qc": data.get("qc"),
         "timestamp": datetime.now().isoformat(),
         "tampered": False,
@@ -396,7 +398,7 @@ async def send_message(sid, data):
         "value": value,
         "phase": session.get("phase", "waiting"),
         "view": session.get("current_view", 0),  # HotStuff视图（核心逻辑使用）
-        "round": session.get("current_view", 0),  # 兼容前端：round 与 view 相同（仅用于历史过滤和前端展示，核心逻辑不使用）
+        "round": session.get("current_round", 1),  # 使用当前轮次标记消息（用于历史过滤和前端展示）
         "qc": data.get("qc"),                    # Quorum Certificate
         "timestamp": datetime.now().isoformat(),
         "tampered": False
@@ -564,6 +566,7 @@ async def trigger_robot_votes(session_id: str, view: int, phase: str, value: int
         if node_info['role'] == 'root':
             continue
 
+        current_round = session.get("current_round", 1)
         vote_msg: Dict[str, Any] = {
             "from": robot_id,
             "to": target_id,
@@ -571,7 +574,7 @@ async def trigger_robot_votes(session_id: str, view: int, phase: str, value: int
             "value": value,
             "phase": phase,              # 此处为新的阶段：pre-commit / commit
             "view": view,
-            "round": view,  # 兼容前端：round 与 view 相同（HotStuff 核心逻辑不使用 round，仅用于前端展示）
+            "round": current_round,  # 使用当前轮次标记消息
             "timestamp": datetime.now().isoformat(),
             "tampered": False,
             "isRobot": True
@@ -751,6 +754,7 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
         print(f"[双层 HotStuff] Group Leader {group_leader_id} 收到组内 {len(group_voters)} 票（阈值 {local_threshold}），生成 GroupVote 发送给 Global Leader")
         
         global_leader_id = get_current_leader(session, view)
+        current_round = session.get("current_round", 1)
         group_vote_message = {
             "from": group_leader_id,
             "to": global_leader_id,
@@ -758,6 +762,7 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
             "value": value,
             "phase": phase,
             "view": view,
+            "round": current_round,  # 使用当前轮次标记消息
             "is_group_vote": True,  # 标记为 GroupVote
             "weight": len(group_voters),  # 权重 = 组内投票数
             "group_id": voter_info['group_id'],
@@ -859,6 +864,7 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
     session["phase"] = next_phase
     session["phase_step"] += 1
     
+    current_round = session.get("current_round", 1)
     qc_message = {
         "from": global_leader_id,
         "to": "group_leaders",  # 双层结构：只发给 Group Leaders
@@ -866,6 +872,7 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
         "phase": phase,
         "next_phase": next_phase,
         "view": view,
+        "round": current_round,  # 使用当前轮次标记消息
         "qc": qc,
         "timestamp": datetime.now().isoformat()
     }
@@ -1282,8 +1289,10 @@ async def finalize_consensus(session_id: str, status: str = "Consensus Completed
     
     print(f"会话 {session_id} View {session['current_view']} 共识完成: {status}")
     
-    # 保存共识历史（使用 view 作为标识）
+    # 保存共识历史（使用 round 和 view 作为标识）
+    current_round = session.get("current_round", 1)
     session["consensus_history"].append({
+        "round": current_round,
         "view": session["current_view"],
         "status": status,
         "description": description,
@@ -1414,12 +1423,14 @@ async def trigger_view_change(session_id: str, old_view: int):
         node_state = session["node_states"].get(node_id, {})
         highQC = node_state.get("highQC")  # 节点最高的 prepareQC
         
+        current_round = session.get("current_round", 1)
         new_view_msg = {
             "from": node_id,
             "to": next_leader_id,
             "type": "new_view",
             "view": new_view,
             "old_view": old_view,
+            "round": current_round,  # 使用当前轮次标记消息
             "highQC": highQC,  # 携带最高的 QC
             "timestamp": datetime.now().isoformat()
         }
@@ -1504,34 +1515,14 @@ async def start_next_round(session_id: str):
     # 所有消息通过 round 字段区分不同轮次
     # session["messages"] 保持累积，不清空
     
-    # 将临时机器人节点移回人类节点列表
-    config = session["config"]
-    original_robot_count = config["robotNodes"]
-    
-    print(f"第{current_round}轮开始 - 原始机器人节点数: {original_robot_count}")
+    # 节点状态持久化：保持 robot_nodes 和 human_nodes 列表不变
+    # 如果用户在第一轮选择了"Normal Consensus (托管给机器人)"或保持"Human Mode"，
+    # 这个状态必须在后续轮次继续保持，不要重置回默认状态
+    print(f"第{current_round}轮开始 - 保持节点状态持久化")
     print(f"第{current_round}轮开始 - 当前机器人节点: {session['robot_nodes']}")
     print(f"第{current_round}轮开始 - 当前人类节点: {session['human_nodes']}")
     
-    # 找出临时加入的机器人节点（ID >= original_robot_count）
-    temp_robot_nodes = [node_id for node_id in session["robot_nodes"] if node_id >= original_robot_count]
-    
-    print(f"第{current_round}轮开始 - 临时机器人节点: {temp_robot_nodes}")
-    
-    # 将临时机器人节点移回人类节点列表
-    for node_id in temp_robot_nodes:
-        if node_id in session["robot_nodes"]:
-            session["robot_nodes"].remove(node_id)
-        if node_id not in session["human_nodes"]:
-            session["human_nodes"].append(node_id)
-        # 清除临时机器人节点状态
-        if node_id in session["robot_node_states"]:
-            del session["robot_node_states"][node_id]
-    
-    print(f"已将临时机器人节点 {temp_robot_nodes} 移回人类节点列表")
-    print(f"第{current_round}轮开始后 - 机器人节点: {session['robot_nodes']}")
-    print(f"第{current_round}轮开始后 - 人类节点: {session['human_nodes']}")
-    
-    # 重置机器人节点状态（只重置原始机器人节点）
+    # 重置机器人节点状态（重置所有机器人节点的投票状态，但保持节点身份不变）
     for robot_id in session["robot_nodes"]:
         session["robot_node_states"][robot_id] = {
             "received_pre_prepare": False,
@@ -1713,6 +1704,7 @@ async def robot_send_pre_prepare(session_id: str, highQC: Optional[Dict] = None)
         proposal_value = highQC.get("value", config["proposalValue"])
     
     # 发送 Proposal 消息（双层 HotStuff：Global Leader -> Group Leaders -> Members）
+    current_round = session.get("current_round", 1)
     message = {
         "from": proposer_id,
         "to": "group_leaders",  # 双层结构：只发给 Group Leaders
@@ -1720,6 +1712,7 @@ async def robot_send_pre_prepare(session_id: str, highQC: Optional[Dict] = None)
         "value": proposal_value,
         "phase": "prepare",  # HotStuff 中 Proposal 开启 Prepare 阶段
         "view": current_view,
+        "round": current_round,  # 使用当前轮次标记消息
         "qc": highQC,  # 携带 HighQC（如果有）
         "timestamp": datetime.now().isoformat(),
         "tampered": False,
@@ -1882,6 +1875,7 @@ async def handle_robot_prepare(session_id: str, robot_id: int, value: int):
     
     target_sid = node_sockets.get(session_id, {}).get(target_id)
     
+    current_round = session.get("current_round", 1)
     vote_message = {
         "from": robot_id,
         "to": target_id,
@@ -1889,6 +1883,7 @@ async def handle_robot_prepare(session_id: str, robot_id: int, value: int):
         "value": value,
         "phase": "prepare",
         "view": current_view,
+        "round": current_round,  # 使用当前轮次标记消息
         "qc": None,
         "timestamp": datetime.now().isoformat(),
         "tampered": False,
@@ -1980,6 +1975,7 @@ async def handle_robot_commit(session_id: str, robot_id: int, value: int):
     
     target_sid = node_sockets.get(session_id, {}).get(target_id)
     
+    current_round = session.get("current_round", 1)
     vote_message = {
         "from": robot_id,
         "to": target_id,
@@ -1987,7 +1983,7 @@ async def handle_robot_commit(session_id: str, robot_id: int, value: int):
         "value": value,
         "phase": "commit",
         "view": current_view,
-        "round": current_view,  # 兼容旧逻辑
+        "round": current_round,  # 使用当前轮次标记消息
         "qc": None,
         "timestamp": datetime.now().isoformat(),
         "tampered": False,

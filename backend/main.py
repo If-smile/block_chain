@@ -497,17 +497,23 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                 if step7_anim:
                     animation_sequence.append(step7_anim)
 
-    # 获取共识结果文本
+    # 获取共识结果文本（从共识历史中查找对应轮次）
     round_consensus = "Consensus in progress..."
+    consensus_result_for_round = None
     for history in session.get("consensus_history", []):
         if history.get("round") == round:
             round_consensus = f"{history.get('status', 'Unknown')}: {history.get('description', '')}"
+            # 如果该轮次有共识结果，也返回它
+            if session.get("consensus_result") and session["consensus_result"].get("stats"):
+                consensus_result_for_round = session["consensus_result"]
             break
 
     # 获取共识结果的复杂度对比数据（如果存在）
     complexity_comparison = None
-    if session.get("consensus_result") and session["consensus_result"].get("stats"):
-        complexity_comparison = session["consensus_result"]["stats"].get("complexity_comparison")
+    network_stats_for_round = None
+    if consensus_result_for_round and consensus_result_for_round.get("stats"):
+        complexity_comparison = consensus_result_for_round["stats"].get("complexity_comparison")
+        network_stats_for_round = consensus_result_for_round["stats"].get("network_stats")
     
     return {
         "round": round,
@@ -520,8 +526,8 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
         "proposalValue": config["proposalValue"],
         "stats": {
             "complexity_comparison": complexity_comparison,
-            "network_stats": session.get("network_stats", {})
-        } if complexity_comparison else None
+            "network_stats": network_stats_for_round or session.get("network_stats", {})
+        } if complexity_comparison or network_stats_for_round else None
     }
 
 

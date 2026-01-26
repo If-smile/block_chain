@@ -547,7 +547,7 @@ export default {
           const leaderId =
             typeof roundData.leaderId === 'number'
               ? roundData.leaderId
-              : ((roundNum - 1 + (roundData.nodeCount || formData.nodeCount)) % (roundData.nodeCount || formData.nodeCount))
+              : ((roundNum - 1 + (roundData.nodeCount || sessionInfo.value?.config?.nodeCount || formData.nodeCount)) % (roundData.nodeCount || sessionInfo.value?.config?.nodeCount || formData.nodeCount))
           simulationRounds.value.push({
             id: roundNum,
             data: { ...roundData, leaderId },
@@ -555,8 +555,11 @@ export default {
           })
         }
         
-        currentRound.value = rounds[0]
-        currentSimulation.value = simulationRounds.value[0].data
+        // 默认选中最新的一轮（最后一轮）
+        const latestRound = rounds.length > 0 ? rounds[rounds.length - 1] : rounds[0] || 1
+        currentRound.value = latestRound
+        const latestRoundData = simulationRounds.value.find(r => r.id === latestRound)
+        currentSimulation.value = latestRoundData ? latestRoundData.data : (simulationRounds.value[0]?.data || null)
         
         demoDialogVisible.value = true
         

@@ -105,6 +105,7 @@ def create_session(config: SessionConfig) -> SessionInfo:
         "phase_step": 0,
         "current_view": 0,   # 当前视图编号（HotStuff，View 即时钟，核心逻辑使用此字段）
         "current_round": 1,  # 当前轮次编号（用于消息标记和历史回放，从1开始）
+        "start_view_of_round": 0,  # 当前轮次的起始视图（用于统计 View Change 次数）
         "leader_id": 0,      # 当前视图的Leader ID
         "connected_nodes": [],
         "robot_nodes": [],  # 机器人节点列表
@@ -1255,6 +1256,20 @@ async def finalize_consensus(session_id: str, status: str = "Consensus Completed
     print("\n" + "=" * 80)
     print("📊 共识算法通信复杂度对比分析报告")
     print("=" * 80)
+    print("-" * 80)
+    print(f"[统计说明]")
+    current_round = session.get("current_round", 1)
+    start_view = session.get("start_view_of_round", 0)
+    current_view = session.get("current_view", 0)
+    view_change_count = max(0, current_view - start_view)
+    print(f"  • 当前轮次 (Round): {current_round}")
+    print(f"  • 经历视图 (Views): {current_view} (View Change 次数: {view_change_count})")
+    print(f"  • 统计范围: 从 Pre-Prepare 到 Decide 的完整共识周期")
+    print(f"  • 注意: 本系统演示的是 Basic HotStuff (分阶段提交)。")
+    print(f"         如果是 Chained HotStuff (流水线模式)，")
+    print(f"         Prepare QC 同时也是下一视图的 Pre-Prepare 消息，")
+    print(f"         其摊还通信复杂度会进一步降低。")
+    print("-" * 80)
     print(f"[配置] 节点总数 N = {n}, 分组数 K = {branch_count}")
     print(f"[实测] 双层 HotStuff 实际消息数: {hotstuff_double_actual}")
     print("-" * 80)
@@ -1497,6 +1512,8 @@ async def start_next_round(session_id: str):
     session["current_round"] += 1
     session["current_view"] += 1
     current_round = session["current_round"]
+    # 记录本轮次的起始视图，用于统计 View Change 次数
+    session["start_view_of_round"] = session["current_view"]
     # 根据当前视图更新 Leader
     session["leader_id"] = get_current_leader(session)
     
@@ -1616,6 +1633,9 @@ async def start_pbft_process(session_id: str):
     session["status"] = "running"
     session["phase"] = "new-view"  # HotStuff 第一阶段是 new-view
     session["phase_step"] = 0
+    # 记录第一轮次的起始视图
+    if "start_view_of_round" not in session:
+        session["start_view_of_round"] = session["current_view"]
     
     # 通知所有节点进入 new-view 阶段
     await sio.emit('phase_update', {

@@ -1304,13 +1304,14 @@ async def finalize_consensus(session_id: str, status: str = "Consensus Completed
     
     print(f"会话 {session_id} View {session['current_view']} 共识完成: {status}")
     
-    # 保存共识历史（使用 round 和 view 作为标识）
+    # 保存共识历史（使用 round 和 view 作为标识，包含完整的 stats 数据）
     current_round = session.get("current_round", 1)
     session["consensus_history"].append({
         "round": current_round,
         "view": session["current_view"],
         "status": status,
         "description": description,
+        "stats": consensus_result.get("stats"),  # 保存完整的统计数据，包括 complexity_comparison 和 network_stats
         "timestamp": datetime.now().isoformat()
     })
     

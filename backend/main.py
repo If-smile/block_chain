@@ -195,18 +195,16 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     if messages.get("qc"):
         all_round_msgs.extend([m for m in messages["qc"] if m.get("round") == round])
     
+    # 1. 确定该轮次的最终视图 (Target View)
     if all_round_msgs:
-        # 取第一个消息的 view 作为该轮次的历史视图
-        target_view = all_round_msgs[0].get("view", round)
-        # 如果第一个消息没有 view，尝试查找其他消息
-        for msg in all_round_msgs:
-            if "view" in msg:
-                target_view = msg["view"]
-                break
+        # 找出该轮次涉及的所有 view，取最大值（通常是最终达成共识的 view）
+        views = set(m.get("view") for m in all_round_msgs if "view" in m)
+        if views:
+            target_view = max(views)
     
     # 计算历史时刻的 Global Leader（使用历史视图）
     historical_leader_id = target_view % n
-    print(f"[get_session_history] Round {round}: 使用历史 View {target_view}, Leader ID = {historical_leader_id}")
+    print(f"[get_session_history] Round {round}: 过滤显示最终 View {target_view}, Leader ID = {historical_leader_id}")
 
     # 2. 准备数据容器
     table_messages: List[Dict[str, Any]] = []      # 表格用（合并广播，含phase）
@@ -216,13 +214,19 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     def get_msgs(key, r):
         return [m for m in messages.get(key, []) if m.get("round") == r]
     
+    # 辅助函数：按视图过滤消息（只保留属于 target_view 的消息）
+    # 这样可以避免 View 0 (超时) 和 View 1 (成功) 的消息混在一起导致动画错乱
+    def filter_msgs_by_view(msgs, view):
+        return [m for m in msgs if m.get("view") == view]
+    
     # 辅助函数：获取节点的拓扑信息（强制使用历史视图）
     def get_node_topology(node_id):
         return get_topology_info(session, node_id, view=target_view)
 
-    round_pre_prepare = get_msgs("pre_prepare", round)
-    round_votes = get_msgs("vote", round)
-    round_qc = get_msgs("qc", round)
+    # 使用过滤后的消息列表：只保留属于 target_view 的消息
+    round_pre_prepare = filter_msgs_by_view(get_msgs("pre_prepare", round), target_view)
+    round_votes = filter_msgs_by_view(get_msgs("vote", round), target_view)
+    round_qc = filter_msgs_by_view(get_msgs("qc", round), target_view)
 
     # === 构建 HotStuff 7步 流程（支持双层分层动画）===
 
@@ -497,23 +501,32 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                 if step7_anim:
                     animation_sequence.append(step7_anim)
 
-    # 获取共识结果文本（从共识历史中查找对应轮次）
+    # === 修复：从 consensus_history 中查找对应轮次的统计数据 ===
     round_consensus = "Consensus in progress..."
-    consensus_result_for_round = None
-    for history in session.get("consensus_history", []):
-        if history.get("round") == round:
-            round_consensus = f"{history.get('status', 'Unknown')}: {history.get('description', '')}"
-            # 如果该轮次有共识结果，也返回它
-            if session.get("consensus_result") and session["consensus_result"].get("stats"):
-                consensus_result_for_round = session["consensus_result"]
-            break
-
-    # 获取共识结果的复杂度对比数据（如果存在）
     complexity_comparison = None
-    network_stats_for_round = None
-    if consensus_result_for_round and consensus_result_for_round.get("stats"):
-        complexity_comparison = consensus_result_for_round["stats"].get("complexity_comparison")
-        network_stats_for_round = consensus_result_for_round["stats"].get("network_stats")
+    # 默认为空，避免显示当前正在进行的下一轮的即时数据（那样不准确）
+    historical_network_stats = {}
+    
+    # 遍历历史记录找到对应轮次
+    found_history = False
+    for history in session.get("consensus_history", []):
+        # 确保比较的是 int 类型
+        if history.get("round") == round:
+            found_history = True
+            round_consensus = f"{history.get('status', 'Unknown')}: {history.get('description', '')}"
+            if "stats" in history:
+                stats_data = history["stats"]
+                complexity_comparison = stats_data.get("complexity_comparison")
+                historical_network_stats = stats_data.get("network_stats", {})
+            break
+    
+    # (可选) 如果是查看刚刚完成的最新一轮，且还没写入 history（极少情况），可回退读取 consensus_result
+    if not found_history and session.get("consensus_result"):
+        # 简单校验一下 stats 是否存在
+        if session["consensus_result"].get("stats"):
+            # 这里不做严格 round 校验了，作为最后一道防线
+            complexity_comparison = session["consensus_result"]["stats"].get("complexity_comparison")
+            historical_network_stats = session["consensus_result"]["stats"].get("network_stats", {})
     
     return {
         "round": round,
@@ -526,8 +539,9 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
         "proposalValue": config["proposalValue"],
         "stats": {
             "complexity_comparison": complexity_comparison,
-            "network_stats": network_stats_for_round or session.get("network_stats", {})
-        } if complexity_comparison or network_stats_for_round else None
+            # 优先使用历史快照的 network_stats
+            "network_stats": historical_network_stats if historical_network_stats else session.get("network_stats", {})
+        } if complexity_comparison else None
     }
 
 

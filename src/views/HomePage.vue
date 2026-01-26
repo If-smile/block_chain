@@ -321,13 +321,13 @@
             <Topology
               v-if="currentSimulation"
               ref="topologyRef"
-              :topologyType="formData.topology"
-              :nodeCount="formData.nodeCount"
-              :byzantineNodes="formData.faultyNodes"
+              :topologyType="sessionInfo?.config?.topology || formData.topology"
+              :nodeCount="sessionInfo?.config?.nodeCount || formData.nodeCount"
+              :byzantineNodes="sessionInfo?.config?.faultyNodes || formData.faultyNodes"
               :simulationResult="currentSimulation"
-              :proposalValue="formData.proposalValue"
+              :proposalValue="sessionInfo?.config?.proposalValue || formData.proposalValue"
               :currentLeader="demoLeader"
-              :branchCount="formData.branchCount"
+              :branchCount="sessionInfo?.config?.branchCount || formData.branchCount"
             />
           </div>
           

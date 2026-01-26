@@ -1906,6 +1906,32 @@ async def handle_robot_prepare(session_id: str, robot_id: int, value: int):
     
     await handle_vote(session_id, vote_message)
 
+async def schedule_robot_prepare(session_id: str, robot_id: int, value: int):
+    """调度机器人节点在短暂延迟后发送准备阶段投票"""
+    session = get_session(session_id)
+    if not session:
+        return
+    
+    current_view = session["current_view"]
+    # 短暂延迟，模拟网络延迟或让出初始化时间
+    await asyncio.sleep(2.0)
+    
+    session = get_session(session_id)
+    if not session:
+        return
+    
+    # 检查视图是否改变
+    if session["current_view"] != current_view:
+        print(f"视图已改变（{current_view} -> {session['current_view']}），节点{robot_id}放弃发送准备消息")
+        return
+    
+    # 检查阶段是否改变
+    if session.get("phase") != "prepare":
+        print(f"阶段已改变，节点{robot_id}放弃发送准备消息")
+        return
+    
+    await handle_robot_prepare(session_id, robot_id, value)
+
 async def check_robot_nodes_ready_for_commit(session_id: str):
     """HotStuff 中提交阶段由 Leader 收齐QC 后推进，这里仅保留占位"""
     # 在 HotStuff 模式下，机器人投票由 Leader 汇总生成 QC 触发下一阶段

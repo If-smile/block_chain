@@ -357,6 +357,13 @@ const chartOption = computed(() => {
           color: '#E0E0E0',
           borderRadius: [0, 4, 4, 0]
         },
+        label: {
+          show: true,
+          position: 'right',
+          formatter: (params) => formatNumber(params.value),
+          fontSize: 12,
+          color: '#666'
+        },
         animationDuration: 1000,
         animationEasing: 'cubicOut'
       },
@@ -581,7 +588,7 @@ const getTagType = (msg) => {
 /* ECharts 容器 */
 .chart-container {
   width: 100%;
-  height: 300px;
+  height: 400px;
   margin: 20px 0;
 }
 

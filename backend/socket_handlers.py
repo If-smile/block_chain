@@ -315,7 +315,8 @@ async def send_prepare(sid, data):
     
     session["messages"]["vote"].append(vote_message)
     
-    # 单播给上级（不广播）
+    # 单播给上级（不广播）——无论目标是否在线，都计入一次消息发送
+    count_message_sent(session_id, is_broadcast=False)
     if target_sid:
         if should_deliver_message(session_id):
             await sio.emit('message_received', vote_message, room=target_sid)
@@ -371,7 +372,8 @@ async def send_commit(sid, data):
     
     session["messages"]["vote"].append(vote_message)
     
-    # 单播给上级（不广播）
+    # 单播给上级（不广播）——无论目标是否在线，都计入一次消息发送
+    count_message_sent(session_id, is_broadcast=False)
     if target_sid:
         if should_deliver_message(session_id):
             await sio.emit('message_received', vote_message, room=target_sid)
@@ -443,6 +445,8 @@ async def send_message(sid, data):
         message["to"] = target_id
         
         target_sid = node_sockets.get(session_id, {}).get(target_id)
+        # 单播给上级（不广播）——无论目标是否在线，都计入一次消息发送
+        count_message_sent(session_id, is_broadcast=False)
         if target_sid:
             await sio.emit('message_received', message, room=target_sid)
             role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
@@ -742,9 +746,6 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
             print(f"Member {voter} 投票目标错误（目标: {target_id}, 应为 Group Leader: {group_leader_id}），忽略")
             return
         
-        # 统计一次 Member -> Group Leader 的单播消息
-        count_message_sent(session_id, is_broadcast=False)
-        
         # 存储到组内投票池
         key = (view, phase, value, group_leader_id)  # 添加 group_leader_id 区分不同组
         pending_group_votes = session.setdefault("pending_group_votes", {})
@@ -779,9 +780,6 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
             "timestamp": datetime.now().isoformat()
         }
         
-        # 统计一次 Group Leader -> Global Leader 的单播 GroupVote 消息
-        count_message_sent(session_id, is_broadcast=False)
-        
         session["messages"]["vote"].append(group_vote_message)
         
         # 发送给 Global Leader
@@ -813,11 +811,6 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
     else:
         print(f"未知角色 {voter_role} 的投票，忽略")
         return
-    
-    # 统计一次 Group Leader / Global Leader -> Global Leader 的直接投票消息
-    # 自己给自己投票不计入网络消息
-    if not is_group_vote and voter != global_leader_id:
-        count_message_sent(session_id, is_broadcast=False)
     
     # Global Leader 收集投票（包括 GroupVote 和直接投票）
     key = (view, phase, value)
@@ -908,7 +901,9 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
         if group_start_id < n and group_start_id != global_leader_id:  # 排除 Global Leader 自己
             group_leaders.append(group_start_id)
     
-    # 发送给 Group Leaders
+    # 发送给 Group Leaders（逻辑上发送给所有 Group Leaders）
+    if group_leaders:
+        count_message_sent(session_id, is_broadcast=False, target_count=len(group_leaders))
     for gl_id in group_leaders:
         gl_sid = node_sockets.get(session_id, {}).get(gl_id)
         if gl_sid:
@@ -917,7 +912,7 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
             else:
                 print(f"[网络模拟] QC 消息被丢弃 (目标: Group Leader {gl_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
     
-    # 第二步：Group Leaders 转发给组内 Members
+    # 第二步：Group Leaders 转发给组内 Members（按组统计目标成员数）
     for gl_id in group_leaders:
         gl_info = get_topology_info(session, gl_id, view)
         group_id = gl_info['group_id']
@@ -929,6 +924,11 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
         forward_message["from"] = gl_id
         forward_message["to"] = "group_members"
         
+        # 逻辑目标成员总数（不依赖 member_sid）
+        target_member_count = max(group_end_id - (group_start_id + 1), 0)
+        if target_member_count > 0:
+            count_message_sent(session_id, is_broadcast=False, target_count=target_member_count)
+        
         for member_id in range(group_start_id + 1, group_end_id):  # +1 因为 Group Leader 自己不需要转发
             member_sid = node_sockets.get(session_id, {}).get(member_id)
             if member_sid:
@@ -936,10 +936,6 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
                     await sio.emit('message_received', forward_message, room=member_sid)
                 else:
                     print(f"[网络模拟] QC 转发消息被丢弃 (目标: Member {member_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
-    
-    # 统计消息数：Global Leader -> Group Leaders (K-1) + Group Leaders -> Members (N-K)
-    total_forward_messages = len(group_leaders) + (n - len(group_leaders) - 1)  # -1 排除 Global Leader
-    count_message_sent(session_id, is_broadcast=False, target_count=total_forward_messages)
     
     # 也发送给所有节点（用于前端展示，但实际路由是分层的）
     await sio.emit('message_received', qc_message, room=session_id)
@@ -1175,7 +1171,8 @@ async def finalize_consensus(session_id: str, status: str = "Consensus Completed
     shadow_pbft_actual = 2 * n * (n - 1)
     
     # 2. Shadow Pure HotStuff: 星型广播（4 个阶段，每阶段 2×(N-1) 条消息）
-    shadow_hotstuff_actual = 4 * (n - 1)
+    #    4 * (Leader 广播 + 节点回复)
+    shadow_hotstuff_actual = 8 * (n - 1)
     
     # 3. Shadow Multi-Layer PBFT: 分层全网广播
     #    顶层：K 个组长之间 PBFT -> 2 * K * (K - 1)
@@ -1184,51 +1181,51 @@ async def finalize_consensus(session_id: str, status: str = "Consensus Completed
     
     # ========== 计算4种算法的理论消息数 (Theoretical) ==========
     
-    # 1. 双层 HotStuff (本系统) 理论估算：O(N)，这里给一个粗略上界 8N
+    # Double-Layer HotStuff (本系统) 理论值：4阶段 * 2层 * N
     hotstuff_double_actual = actual_messages
-    hotstuff_double_theoretical = 8 * n
+    theoretical_double_hotstuff = 8 * n
     
-    # 2. 传统 PBFT (Pure PBFT) - O(N^2)
-    pbft_pure_theoretical = 2 * n * n
+    # 传统 PBFT (Pure PBFT) - O(N^2)
+    theoretical_pbft = 2 * n * n
     
-    # 3. 传统 HotStuff (Pure HotStuff) - O(N)
-    hotstuff_pure_theoretical = 4 * n
+    # 传统 HotStuff (Pure HotStuff) - O(N)
+    theoretical_hotstuff = 4 * n
     
-    # 4. 双层 PBFT (Multi-Layer PBFT) - 分层 PBFT: O(K² + N²/K)
-    pbft_multi_layer_theoretical = 2 * k * k + 2 * n * n // k
+    # 双层 PBFT (Multi-Layer PBFT) - 分层 PBFT: O(K² + N²/K)
+    theoretical_multilayer = 2 * k * k + 2 * n * n // k
     
     # ========== 计算优化倍数 ==========
-    # 双层 HotStuff 相对于其他算法的优化倍数
-    optimization_vs_pbft_pure = pbft_pure_theoretical / hotstuff_double_actual if hotstuff_double_actual > 0 else 0.0
-    optimization_vs_hotstuff_pure = hotstuff_pure_theoretical / hotstuff_double_actual if hotstuff_double_actual > 0 else 0.0
-    optimization_vs_pbft_multi = pbft_multi_layer_theoretical / hotstuff_double_actual if hotstuff_double_actual > 0 else 0.0
+    # 双层 HotStuff 相对于其他算法的优化倍数（基于理论值）
+    optimization_vs_pbft_pure = theoretical_pbft / hotstuff_double_actual if hotstuff_double_actual > 0 else 0.0
+    optimization_vs_hotstuff_pure = theoretical_hotstuff / hotstuff_double_actual if hotstuff_double_actual > 0 else 0.0
+    optimization_vs_pbft_multi = theoretical_multilayer / hotstuff_double_actual if hotstuff_double_actual > 0 else 0.0
     
     # ========== 构建复杂度对比数据 ==========
     complexity_comparison = {
         "double_hotstuff": {
             "name": "Double-Layer HotStuff (System)",
-            "theoretical": hotstuff_double_theoretical,
+            "theoretical": theoretical_double_hotstuff,
             "actual": hotstuff_double_actual,
             "complexity": "O(N)",
             "is_current": True
         },
         "pbft_pure": {
             "name": "PBFT (Pure)",
-            "theoretical": pbft_pure_theoretical,
+            "theoretical": theoretical_pbft,
             "actual": shadow_pbft_actual,
             "complexity": "O(N²)",
             "optimization_ratio": optimization_vs_pbft_pure
         },
         "hotstuff_pure": {
             "name": "HotStuff (Pure)",
-            "theoretical": hotstuff_pure_theoretical,
+            "theoretical": theoretical_hotstuff,
             "actual": shadow_hotstuff_actual,
             "complexity": "O(N)",
             "optimization_ratio": optimization_vs_hotstuff_pure
         },
         "pbft_multi_layer": {
             "name": "PBFT (Multi-Layer)",
-            "theoretical": pbft_multi_layer_theoretical,
+            "theoretical": theoretical_multilayer,
             "actual": shadow_multilayer_actual,
             "complexity": "O(K² + N²/K)",
             "optimization_ratio": optimization_vs_pbft_multi
@@ -1275,11 +1272,13 @@ async def finalize_consensus(session_id: str, status: str = "Consensus Completed
     print(f"[配置] 节点总数 N = {n}, 分组数 K = {branch_count}")
     print(f"[实测] 双层 HotStuff 实际消息数: {hotstuff_double_actual}")
     print("-" * 80)
-    print(f"[算法对比]")
-    print(f"  1. 双层 HotStuff (本系统):     {hotstuff_double_actual:>8} 条消息 (实际)")
-    print(f"  2. 传统 PBFT (Pure PBFT):      {pbft_pure_theoretical:>8} 条消息 (理论: O(N²))")
-    print(f"  3. 传统 HotStuff (Pure):       {hotstuff_pure_theoretical:>8} 条消息 (理论: O(N))")
-    print(f"  4. 双层 PBFT (Multi-Layer):    {pbft_multi_layer_theoretical:>8} 条消息 (理论: O(K² + N²/K))")
+    print(f"[算法对比] (Theoretical vs Actual/Shadow)")
+    print(f"{'算法':<28}{'Theoretical':>16}{'Actual/Shadow':>18}{'复杂度':>12}")
+    print("-" * 80)
+    print(f"{'Double-Layer HotStuff':<28}{theoretical_double_hotstuff:>16}{hotstuff_double_actual:>18}{'O(N)':>12}")
+    print(f"{'PBFT (Pure)':<28}{theoretical_pbft:>16}{shadow_pbft_actual:>18}{'O(N²)':>12}")
+    print(f"{'HotStuff (Pure)':<28}{theoretical_hotstuff:>16}{shadow_hotstuff_actual:>18}{'O(N)':>12}")
+    print(f"{'PBFT (Multi-Layer)':<28}{theoretical_multilayer:>16}{shadow_multilayer_actual:>18}{'O(K²+N²/K)':>12}")
     print("-" * 80)
     if hotstuff_double_actual > 0:
         print(f"[优化倍数] 双层 HotStuff 相对于:")
@@ -1484,9 +1483,9 @@ async def trigger_view_change(session_id: str, old_view: int):
         if new_view not in pending_new_views:
             pending_new_views[new_view] = {}
         pending_new_views[new_view][node_id] = new_view_msg
-    
-    # 统计消息数（星型拓扑：N-1 个节点发送给 Leader）
-    count_message_sent(session_id, is_broadcast=False, target_count=n - 1)
+        
+        # 统计每个节点发送给 Leader 的 NEW-VIEW 消息（包含机器人和人类）
+        count_message_sent(session_id, is_broadcast=False)
     
     # 通知所有节点进入 New-View 阶段
     await sio.emit('phase_update', {
@@ -1769,7 +1768,9 @@ async def robot_send_pre_prepare(session_id: str, highQC: Optional[Dict] = None)
         if group_start_id < n and group_start_id != proposer_id:  # 排除 Global Leader 自己
             group_leaders.append(group_start_id)
     
-    # 发送给 Group Leaders
+    # 发送给 Group Leaders（逻辑上发送给所有 Group Leaders）
+    if group_leaders:
+        count_message_sent(session_id, is_broadcast=False, target_count=len(group_leaders))
     for gl_id in group_leaders:
         gl_sid = node_sockets.get(session_id, {}).get(gl_id)
         if gl_sid:
@@ -1790,6 +1791,11 @@ async def robot_send_pre_prepare(session_id: str, highQC: Optional[Dict] = None)
         forward_message["from"] = gl_id
         forward_message["to"] = "group_members"
         
+        # 逻辑目标成员总数（不依赖 member_sid）
+        target_member_count = max(group_end_id - (group_start_id + 1), 0)
+        if target_member_count > 0:
+            count_message_sent(session_id, is_broadcast=False, target_count=target_member_count)
+        
         for member_id in range(group_start_id + 1, group_end_id):  # +1 因为 Group Leader 自己不需要转发
             member_sid = node_sockets.get(session_id, {}).get(member_id)
             if member_sid:
@@ -1797,10 +1803,6 @@ async def robot_send_pre_prepare(session_id: str, highQC: Optional[Dict] = None)
                     await sio.emit('message_received', forward_message, room=member_sid)
                 else:
                     print(f"[网络模拟] Proposal 转发消息被丢弃 (目标: Member {member_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
-    
-    # 统计消息数：Global Leader -> Group Leaders (K-1) + Group Leaders -> Members (N-K)
-    total_forward_messages = len(group_leaders) + (n - len(group_leaders) - 1)  # -1 排除 Global Leader
-    count_message_sent(session_id, is_broadcast=False, target_count=total_forward_messages)
     
     # 也发送给所有节点（用于前端展示，但实际路由是分层的）
     await sio.emit('message_received', message, room=session_id)
@@ -1926,6 +1928,8 @@ async def handle_robot_prepare(session_id: str, robot_id: int, value: int):
     
     session["messages"]["vote"].append(vote_message)
     
+    # 单播给上级（不广播）——无论目标是否在线，都计入一次消息发送
+    count_message_sent(session_id, is_broadcast=False)
     if target_sid:
         if should_deliver_message(session_id):
             await sio.emit('message_received', vote_message, room=target_sid)
@@ -2025,6 +2029,8 @@ async def handle_robot_commit(session_id: str, robot_id: int, value: int):
     
     session["messages"]["vote"].append(vote_message)
     
+    # 单播给上级（不广播）——无论目标是否在线，都计入一次消息发送
+    count_message_sent(session_id, is_broadcast=False)
     if target_sid:
         if should_deliver_message(session_id):
             await sio.emit('message_received', vote_message, room=target_sid)

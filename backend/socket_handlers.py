@@ -11,6 +11,9 @@ import random
 import asyncio
 from datetime import datetime
 
+# 持久化模块
+import database
+
 # 导入全局状态和 Socket.IO 服务器
 from state import sio, sessions, connected_nodes, node_sockets, get_session
 
@@ -147,6 +150,12 @@ def create_session(config: SessionConfig) -> SessionInfo:
     sessions[session_id] = session
     connected_nodes[session_id] = []
     node_sockets[session_id] = {}
+
+    # 将初始会话状态持久化到 SQLite
+    try:
+        database.upsert_session(session_id, session)
+    except Exception as e:
+        print(f"[database] 保存初始会话 {session_id} 失败: {e}")
     
     # 创建机器人节点并立即开始共识
     asyncio.create_task(create_robot_nodes_and_start(session_id, config.robotNodes))
@@ -1306,14 +1315,22 @@ async def finalize_consensus(session_id: str, status: str = "Consensus Completed
     
     # 保存共识历史（使用 round 和 view 作为标识，包含完整的 stats 数据）
     current_round = session.get("current_round", 1)
-    session["consensus_history"].append({
+    history_item = {
         "round": current_round,
         "view": session["current_view"],
         "status": status,
         "description": description,
         "stats": consensus_result.get("stats"),  # 保存完整的统计数据，包括 complexity_comparison 和 network_stats
         "timestamp": datetime.now().isoformat()
-    })
+    }
+    session["consensus_history"].append(history_item)
+
+    # 将最新历史记录和会话状态持久化
+    try:
+        database.append_history(session_id, history_item)
+        database.upsert_session(session_id, session)
+    except Exception as e:
+        print(f"[database] 保存共识历史/会话状态失败: session_id={session_id}, error={e}")
     
     # HotStuff 中，一次共识完成不代表需要"下一轮"
     # 如果需要继续共识，应该通过 New-View 机制开始新的 View
@@ -1569,6 +1586,12 @@ async def start_next_round(session_id: str):
     }, room=session_id)
     
     print(f"第{current_round}轮开始，所有节点（包括新加入的人类节点）现在可以参与共识")
+
+    # 持久化新一轮开始时的会话状态
+    try:
+        database.upsert_session(session_id, session)
+    except Exception as e:
+        print(f"[database] 保存新一轮会话状态失败: session_id={session_id}, error={e}")
     
     # 机器人提议者发送预准备消息（注意：HotStuff 中应该通过 View Change 继续，而不是"下一轮"）
     # 这里保留以兼容旧代码，但实际上应该通过 trigger_view_change 来继续共识

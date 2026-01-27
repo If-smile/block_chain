@@ -24,6 +24,9 @@ from models import SessionConfig
 from socket_handlers import create_session
 from topology_manager import get_topology_info, is_connection_allowed
 
+# 持久化模块
+import database
+
 # 创建FastAPI应用
 app = FastAPI(title="分布式PBFT共识系统", version="1.0.0")
 
@@ -41,6 +44,43 @@ socket_app = socketio.ASGIApp(sio, app)
 
 # 导入 Socket.IO 事件处理（确保事件处理器被注册）
 import socket_handlers  # 这会注册所有 @sio.event 装饰器
+
+
+# ==================== 启动时加载持久化会话 ====================
+
+@app.on_event("startup")
+async def on_startup():
+    """应用启动时初始化 SQLite，并恢复会话状态"""
+    database.init_db()
+
+    # 从数据库加载所有会话状态
+    persisted_sessions = database.load_all_sessions()
+    print(f"[startup] 从 SQLite 加载 {len(persisted_sessions)} 个会话")
+
+    for session_id, state in persisted_sessions.items():
+        # 防御性处理：确保是 dict
+        if not isinstance(state, dict):
+            continue
+
+        # 如果之前是 running 状态，重启后无法恢复后台任务，统一恢复为 waiting
+        if state.get("status") == "running":
+            state["status"] = "waiting"
+            state["phase"] = "waiting"
+            state["phase_step"] = 0
+
+        # 恢复历史记录（从 history 表加载最新快照）
+        history_items = database.load_history(session_id)
+        state["consensus_history"] = history_items
+
+        # 恢复到内存中的全局 sessions
+        sessions[session_id] = state
+
+        # 已连接节点列表可以从状态中恢复（如果没有则置空）
+        connected_nodes[session_id] = state.get("connected_nodes", [])
+        # WebSocket 连接无法持久化，重启后需要重新连接
+        node_sockets[session_id] = {}
+
+    print("[startup] 会话状态已从 SQLite 恢复到内存")
 
 
 # ==================== HTTP 路由 ====================

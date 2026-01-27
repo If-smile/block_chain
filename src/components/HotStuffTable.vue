@@ -291,39 +291,30 @@ const chartOption = computed(() => {
   }
 
   const algorithms = comparisonAlgorithms.value
-  const yAxisData = algorithms.map(a => a.name).reverse()
-  const seriesData = algorithms.map((a, index) => ({
-    value: a.messages,
+  const yAxisData = algorithms.map(a => a.name)
+  const theoreticalData = algorithms.map(a => a.theoretical ?? 0)
+  const actualData = algorithms.map((a, index) => ({
+    value: a.actual ?? 0,
     itemStyle: {
-      color: getBarColor(algorithms.length - 1 - index, a.is_current)
-    },
-    label: {
-      show: true,
-      position: 'right',
-      formatter: (params) => {
-        const algo = algorithms[algorithms.length - 1 - params.dataIndex]
-        return `{value|${formatNumber(params.value)}} {complexity|${algo.complexity}}`
-      },
-      rich: {
-        value: {
-          fontSize: 14,
-          fontWeight: 'bold',
-          color: '#333'
-        },
-        complexity: {
-          fontSize: 12,
-          color: '#666',
-          padding: [0, 0, 0, 8]
-        }
-      }
+      color: getBarColor(index, a.is_current),
+      borderRadius: [0, 4, 4, 0]
     }
-  })).reverse()
+  }))
 
   return {
+    legend: {
+      data: ['Theoretical Limit', 'Actual / Shadow'],
+      top: 0,
+      right: 10,
+      textStyle: {
+        fontSize: 12,
+        color: '#606266'
+      }
+    },
     grid: {
       left: '15%',
-      right: '35%',
-      top: '5%',
+      right: '30%',
+      top: '12%',
       bottom: '5%'
     },
     xAxis: {
@@ -358,9 +349,43 @@ const chartOption = computed(() => {
     },
     series: [
       {
+        name: 'Theoretical Limit',
         type: 'bar',
-        data: seriesData,
-        barWidth: '60%',
+        data: theoreticalData,
+        barWidth: 14,
+        itemStyle: {
+          color: '#E0E0E0',
+          borderRadius: [0, 4, 4, 0]
+        },
+        animationDuration: 1000,
+        animationEasing: 'cubicOut'
+      },
+      {
+        name: 'Actual / Shadow',
+        type: 'bar',
+        data: actualData,
+        barWidth: 14,
+        barGap: '30%',
+        label: {
+          show: true,
+          position: 'right',
+          formatter: (params) => {
+            const algo = algorithms[params.dataIndex]
+            return `{value|${formatNumber(params.value)}} {complexity|${algo.complexity || ''}}`
+          },
+          rich: {
+            value: {
+              fontSize: 14,
+              fontWeight: 'bold',
+              color: '#333'
+            },
+            complexity: {
+              fontSize: 12,
+              color: '#666',
+              padding: [0, 0, 0, 8]
+            }
+          }
+        },
         animationDuration: 1000,
         animationEasing: 'cubicOut'
       }
@@ -371,10 +396,17 @@ const chartOption = computed(() => {
         type: 'shadow'
       },
       formatter: (params) => {
-        const dataIndex = params[0].dataIndex
-        const algo = algorithms[algorithms.length - 1 - dataIndex]
+        const dataIndex = params[0]?.dataIndex ?? 0
+        const algo = algorithms[dataIndex]
+        const theoretical = params.find(p => p.seriesName === 'Theoretical Limit')
+        const actual = params.find(p => p.seriesName === 'Actual / Shadow')
         let html = `<div style="font-weight: bold; margin-bottom: 8px;">${algo.name}</div>`
-        html += `<div>Message Count: <strong>${formatNumber(algo.messages)}</strong></div>`
+        if (theoretical) {
+          html += `<div>Theoretical: <strong>${formatNumber(theoretical.value)}</strong></div>`
+        }
+        if (actual) {
+          html += `<div>Actual / Shadow: <strong>${formatNumber(actual.value)}</strong></div>`
+        }
         html += `<div>Complexity: <code style="background: #f5f5f5; padding: 2px 6px; border-radius: 3px;">${algo.complexity}</code></div>`
         if (algo.is_current) {
           html += `<div style="color: #4CAF50; margin-top: 6px;">✅ Current system</div>`

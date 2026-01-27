@@ -318,7 +318,6 @@ async def send_prepare(sid, data):
     # 单播给上级（不广播）
     if target_sid:
         if should_deliver_message(session_id):
-            count_message_sent(session_id, is_broadcast=False)
             await sio.emit('message_received', vote_message, room=target_sid)
             role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
             print(f"[双层 HotStuff] 节点 {node_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(prepare)")
@@ -375,7 +374,6 @@ async def send_commit(sid, data):
     # 单播给上级（不广播）
     if target_sid:
         if should_deliver_message(session_id):
-            count_message_sent(session_id, is_broadcast=False)
             await sio.emit('message_received', vote_message, room=target_sid)
             role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
             print(f"[双层 HotStuff] 节点 {node_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(commit)")
@@ -446,7 +444,6 @@ async def send_message(sid, data):
         
         target_sid = node_sockets.get(session_id, {}).get(target_id)
         if target_sid:
-            count_message_sent(session_id, is_broadcast=False)
             await sio.emit('message_received', message, room=target_sid)
             role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
             print(f"[双层 HotStuff] 节点 {node_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE")
@@ -596,7 +593,6 @@ async def trigger_robot_votes(session_id: str, view: int, phase: str, value: int
         # 发送给上级对应的 socket（双层结构：Member -> Group Leader, Group Leader -> Global Leader）
         target_sid = node_sockets.get(session_id, {}).get(target_id)
         if target_sid:
-            count_message_sent(session_id, is_broadcast=False)
             await sio.emit("message_received", vote_msg, room=target_sid)
             role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
             print(f"[双层 HotStuff] 机器人节点 {robot_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE({phase})")
@@ -746,6 +742,9 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
             print(f"Member {voter} 投票目标错误（目标: {target_id}, 应为 Group Leader: {group_leader_id}），忽略")
             return
         
+        # 统计一次 Member -> Group Leader 的单播消息
+        count_message_sent(session_id, is_broadcast=False)
+        
         # 存储到组内投票池
         key = (view, phase, value, group_leader_id)  # 添加 group_leader_id 区分不同组
         pending_group_votes = session.setdefault("pending_group_votes", {})
@@ -780,13 +779,15 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
             "timestamp": datetime.now().isoformat()
         }
         
+        # 统计一次 Group Leader -> Global Leader 的单播 GroupVote 消息
+        count_message_sent(session_id, is_broadcast=False)
+        
         session["messages"]["vote"].append(group_vote_message)
         
         # 发送给 Global Leader
         global_leader_sid = node_sockets.get(session_id, {}).get(global_leader_id)
         if global_leader_sid:
             if should_deliver_message(session_id):
-                count_message_sent(session_id, is_broadcast=False)
                 await sio.emit('message_received', group_vote_message, room=global_leader_sid)
                 print(f"[双层 HotStuff] Group Leader {group_leader_id} 向 Global Leader {global_leader_id} 发送 GroupVote (权重={len(group_voters)})")
             else:
@@ -812,6 +813,11 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
     else:
         print(f"未知角色 {voter_role} 的投票，忽略")
         return
+    
+    # 统计一次 Group Leader / Global Leader -> Global Leader 的直接投票消息
+    # 自己给自己投票不计入网络消息
+    if not is_group_vote and voter != global_leader_id:
+        count_message_sent(session_id, is_broadcast=False)
     
     # Global Leader 收集投票（包括 GroupVote 和直接投票）
     key = (view, phase, value)
@@ -907,7 +913,6 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
         gl_sid = node_sockets.get(session_id, {}).get(gl_id)
         if gl_sid:
             if should_deliver_message(session_id):
-                count_message_sent(session_id, is_broadcast=False)
                 await sio.emit('message_received', qc_message, room=gl_sid)
             else:
                 print(f"[网络模拟] QC 消息被丢弃 (目标: Group Leader {gl_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
@@ -928,7 +933,6 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
             member_sid = node_sockets.get(session_id, {}).get(member_id)
             if member_sid:
                 if should_deliver_message(session_id):
-                    count_message_sent(session_id, is_broadcast=False)
                     await sio.emit('message_received', forward_message, room=member_sid)
                 else:
                     print(f"[网络模拟] QC 转发消息被丢弃 (目标: Member {member_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
@@ -1160,53 +1164,38 @@ async def finalize_consensus(session_id: str, status: str = "Consensus Completed
     network_stats = session.get("network_stats", {})
     actual_messages = network_stats.get("total_messages_sent", 0)
     n = config["nodeCount"]
-    branch_count = config.get("branchCount", 2)  # 分组数 K
+    branch_count = config.get("branchCount", 2)  # 分组数 K（可能为 0 或负数，后面统一归一化）
     
-    # 边界处理：确保 K >= 1
-    if branch_count < 1:
-        branch_count = 1
+    # 边界处理：确保 K >= 1，并计算分组大小
+    k = max(1, branch_count)
+    group_size = n // k if k > 0 else n
     
-    # ========== 计算4种算法的理论消息数 ==========
+    # ========== 影子计算 (Shadow Calculation)：基于当前 n、k 的“推演实际值” ==========
+    # 1. Shadow PBFT: 全网广播（这里只考虑 Prepare + Commit 两个阶段）
+    shadow_pbft_actual = 2 * n * (n - 1)
     
-    # 1. 双层 HotStuff (本系统) - 使用实际消息数
+    # 2. Shadow Pure HotStuff: 星型广播（4 个阶段，每阶段 2×(N-1) 条消息）
+    shadow_hotstuff_actual = 4 * (n - 1)
+    
+    # 3. Shadow Multi-Layer PBFT: 分层全网广播
+    #    顶层：K 个组长之间 PBFT -> 2 * K * (K - 1)
+    #    底层：K 个组，每组 group_size 个节点 -> K * 2 * group_size * (group_size - 1)
+    shadow_multilayer_actual = (2 * k * (k - 1)) + (k * 2 * group_size * (group_size - 1))
+    
+    # ========== 计算4种算法的理论消息数 (Theoretical) ==========
+    
+    # 1. 双层 HotStuff (本系统) 理论估算：O(N)，这里给一个粗略上界 8N
     hotstuff_double_actual = actual_messages
+    hotstuff_double_theoretical = 8 * n
     
     # 2. 传统 PBFT (Pure PBFT) - O(N^2)
-    # PBFT 三阶段：Pre-Prepare, Prepare, Commit
-    # 每个阶段：Leader 广播给所有节点 (N-1) + 所有节点回复给 Leader (N-1)
-    # 总计：3 × 2 × (N-1) ≈ 6N，但考虑到 Prepare 和 Commit 阶段节点间也需要通信
-    # 更准确的估算：Pre-Prepare: N-1, Prepare: (N-1)×(N-1), Commit: (N-1)×(N-1)
-    # 简化：≈ 2 × N^2
     pbft_pure_theoretical = 2 * n * n
     
     # 3. 传统 HotStuff (Pure HotStuff) - O(N)
-    # HotStuff 四阶段：Prepare, Pre-Commit, Commit, Decide
-    # 每个阶段：Leader 广播 Proposal/QC (N-1) + 节点投票给 Leader (N-1)
-    # 但 Decide 阶段不需要投票，所以约 3 个阶段
-    # 总计：3 × 2 × (N-1) ≈ 6N，简化估算为 4N
     hotstuff_pure_theoretical = 4 * n
     
-    # 4. 双层 PBFT (Multi-Layer PBFT) - 分层PBFT
-    # 假设分为 K 个组，每组大小约为 S = N/K
-    # 顶层 (Upper Layer): K 个 Group Leader 进行 PBFT
-    #   - Pre-Prepare: K-1
-    #   - Prepare: (K-1) × (K-1)
-    #   - Commit: (K-1) × (K-1)
-    #   总计：≈ 2 × K^2
-    # 底层 (Lower Layer): K 个组，每组 S 个节点进行 PBFT
-    #   - 每组：2 × S^2
-    #   - K 组：K × (2 × S^2) = 2 × K × (N/K)^2 = 2 × N^2 / K
-    # 总计：2K^2 + 2N^2/K
-    if branch_count > 1:
-        group_size = max(1, n // branch_count)
-        # 顶层：K 个 Group Leader 的 PBFT
-        upper_layer = 2 * branch_count * branch_count
-        # 底层：K 个组的 PBFT
-        lower_layer = 2 * n * n // branch_count if branch_count > 0 else 0
-        pbft_multi_layer_theoretical = upper_layer + lower_layer
-    else:
-        # 如果 K=1，退化为单层 PBFT
-        pbft_multi_layer_theoretical = pbft_pure_theoretical
+    # 4. 双层 PBFT (Multi-Layer PBFT) - 分层 PBFT: O(K² + N²/K)
+    pbft_multi_layer_theoretical = 2 * k * k + 2 * n * n // k
     
     # ========== 计算优化倍数 ==========
     # 双层 HotStuff 相对于其他算法的优化倍数
@@ -1217,27 +1206,31 @@ async def finalize_consensus(session_id: str, status: str = "Consensus Completed
     # ========== 构建复杂度对比数据 ==========
     complexity_comparison = {
         "double_hotstuff": {
-            "name": "Double-Layer HotStuff (Current)",
-            "messages": hotstuff_double_actual,
-            "complexity": f"O(N) (actual: {hotstuff_double_actual})",
+            "name": "Double-Layer HotStuff (System)",
+            "theoretical": hotstuff_double_theoretical,
+            "actual": hotstuff_double_actual,
+            "complexity": "O(N)",
             "is_current": True
         },
         "pbft_pure": {
             "name": "PBFT (Pure)",
-            "messages": pbft_pure_theoretical,
+            "theoretical": pbft_pure_theoretical,
+            "actual": shadow_pbft_actual,
             "complexity": "O(N²)",
             "optimization_ratio": optimization_vs_pbft_pure
         },
         "hotstuff_pure": {
             "name": "HotStuff (Pure)",
-            "messages": hotstuff_pure_theoretical,
+            "theoretical": hotstuff_pure_theoretical,
+            "actual": shadow_hotstuff_actual,
             "complexity": "O(N)",
             "optimization_ratio": optimization_vs_hotstuff_pure
         },
         "pbft_multi_layer": {
             "name": "PBFT (Multi-Layer)",
-            "messages": pbft_multi_layer_theoretical,
-            "complexity": f"O(K² + N²/K)",
+            "theoretical": pbft_multi_layer_theoretical,
+            "actual": shadow_multilayer_actual,
+            "complexity": "O(K² + N²/K)",
             "optimization_ratio": optimization_vs_pbft_multi
         }
     }
@@ -1479,7 +1472,6 @@ async def trigger_view_change(session_id: str, old_view: int):
             node_sid = node_sockets.get(session_id, {}).get(node_id)
             if node_sid:
                 if should_deliver_message(session_id):
-                    count_message_sent(session_id, is_broadcast=False)
                     await sio.emit('message_received', new_view_msg, room=node_sid)
                 else:
                     print(f"[网络模拟] 节点 {node_id} 的 NEW-VIEW 消息被丢弃 (目标: Next Leader {next_leader_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
@@ -1782,7 +1774,6 @@ async def robot_send_pre_prepare(session_id: str, highQC: Optional[Dict] = None)
         gl_sid = node_sockets.get(session_id, {}).get(gl_id)
         if gl_sid:
             if should_deliver_message(session_id):
-                count_message_sent(session_id, is_broadcast=False)
                 await sio.emit('message_received', message, room=gl_sid)
             else:
                 print(f"[网络模拟] Proposal 消息被丢弃 (目标: Group Leader {gl_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
@@ -1803,7 +1794,6 @@ async def robot_send_pre_prepare(session_id: str, highQC: Optional[Dict] = None)
             member_sid = node_sockets.get(session_id, {}).get(member_id)
             if member_sid:
                 if should_deliver_message(session_id):
-                    count_message_sent(session_id, is_broadcast=False)
                     await sio.emit('message_received', forward_message, room=member_sid)
                 else:
                     print(f"[网络模拟] Proposal 转发消息被丢弃 (目标: Member {member_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
@@ -1938,7 +1928,6 @@ async def handle_robot_prepare(session_id: str, robot_id: int, value: int):
     
     if target_sid:
         if should_deliver_message(session_id):
-            count_message_sent(session_id, is_broadcast=False)
             await sio.emit('message_received', vote_message, room=target_sid)
             role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
             print(f"[双层 HotStuff] 机器人节点 {robot_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(prepare) [View {current_view}]")
@@ -2038,7 +2027,6 @@ async def handle_robot_commit(session_id: str, robot_id: int, value: int):
     
     if target_sid:
         if should_deliver_message(session_id):
-            count_message_sent(session_id, is_broadcast=False)
             await sio.emit('message_received', vote_message, room=target_sid)
             role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
             print(f"[双层 HotStuff] 机器人节点 {robot_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(commit)")

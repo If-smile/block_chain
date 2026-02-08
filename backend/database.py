@@ -73,7 +73,8 @@ def _sanitize_session_data(session: Dict[str, Any]) -> Dict[str, Any]:
         try:
             # 尝试序列化，如果失败直接跳过该字段
             json.dumps(value)
-        except TypeError:
+        except TypeError as e:
+            print(f"[CRITICAL WARNING] 字段 {key} 序列化失败，数据已丢弃: {e}")
             continue
         else:
             sanitized[key] = value
@@ -133,6 +134,7 @@ def load_all_sessions() -> Dict[str, Dict[str, Any]]:
                 if isinstance(state, dict):
                     sessions[session_id] = state
             except json.JSONDecodeError:
+                print(f"[CRITICAL WARNING] 会话 {session_id} 状态加载失败 (JSON Decode Error)，已跳过")
                 continue
     finally:
         conn.close()
@@ -196,6 +198,7 @@ def load_history(session_id: str) -> List[Dict[str, Any]]:
                 if isinstance(item, dict):
                     items.append(item)
             except json.JSONDecodeError:
+                print(f"[CRITICAL WARNING] 历史记录解析失败 (JSON Decode Error)，已跳过")
                 continue
     finally:
         conn.close()

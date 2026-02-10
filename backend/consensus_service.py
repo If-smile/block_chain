@@ -175,7 +175,17 @@ class ConsensusService:
                 "group_vote": None,
             }
 
-        # 组内达到阈值，生成 GroupVote（但不负责实际发送）
+        # 该 (view, phase, group_leader_id) 已生成过 GroupVote，避免重复计数/发送
+        generated_group_votes = session.setdefault("generated_group_votes", set())
+        gv_key = (view, phase, group_leader_id)
+        if gv_key in generated_group_votes:
+            return {
+                "status": "pending",
+                "group_vote": None,
+            }
+        generated_group_votes.add(gv_key)
+
+        # 组内达到阈值且首次，生成 GroupVote（但不负责实际发送）
         global_leader_id = get_current_leader(session, view)
         current_round = session.get("current_round", 1)
         group_vote_message = {
@@ -216,7 +226,7 @@ class ConsensusService:
 
         返回：
             {
-                "status": "pending" | "invalid_target" | "qc_generated",
+                "status": "pending" | "invalid_target" | "ignored" | "qc_generated",
                 "qc_message": Optional[Dict[str, Any]],
                 "next_phase": Optional[str],
                 "total_weight": int,
@@ -231,6 +241,17 @@ class ConsensusService:
         target_id = vote_message.get("to")
         is_group_vote = vote_message.get("is_group_vote", False)
         vote_weight = vote_message.get("weight", 1)
+
+        # 若会话已越过该 phase，不再处理，避免重复或过期投票
+        if session.get("phase") != phase:
+            return {
+                "status": "ignored",
+                "qc_message": None,
+                "next_phase": None,
+                "total_weight": 0,
+                "threshold": 0,
+                "routing": None,
+            }
 
         global_leader_id = get_current_leader(session, view)
 
@@ -305,7 +326,21 @@ class ConsensusService:
                 "routing": None,
             }
 
-        # 达到阈值，生成 QC
+        # 该 (view, phase) 已生成过 QC，只算统计不再重复生成/广播
+        generated_qcs = session.setdefault("generated_qcs", set())
+        qc_key = (view, phase)
+        if qc_key in generated_qcs:
+            return {
+                "status": "pending",
+                "qc_message": None,
+                "next_phase": None,
+                "total_weight": total_weight,
+                "threshold": threshold,
+                "routing": None,
+            }
+        generated_qcs.add(qc_key)
+
+        # 达到阈值且首次，生成 QC
         all_voters = set()
         for gv in pending[key]["group_votes"]:
             all_voters.update(gv.get("group_voters", [gv["from"]]))
@@ -518,16 +553,11 @@ class ConsensusService:
         theoretical_multilayer = 2 * k * k + 2 * n * n // k
 
         hotstuff_double_actual = actual_messages
-
-        optimization_vs_pbft_pure = (
-            theoretical_pbft / hotstuff_double_actual if hotstuff_double_actual > 0 else 0.0
-        )
-        optimization_vs_hotstuff_pure = (
-            theoretical_hotstuff / hotstuff_double_actual if hotstuff_double_actual > 0 else 0.0
-        )
-        optimization_vs_pbft_multi = (
-            theoretical_multilayer / hotstuff_double_actual if hotstuff_double_actual > 0 else 0.0
-        )
+        # 比例计算时除数至少为 1，避免除零或无穷大
+        divisor = max(1, actual_messages)
+        optimization_vs_pbft_pure = theoretical_pbft / divisor
+        optimization_vs_hotstuff_pure = theoretical_hotstuff / divisor
+        optimization_vs_pbft_multi = theoretical_multilayer / divisor
 
         complexity_comparison = {
             "double_hotstuff": {

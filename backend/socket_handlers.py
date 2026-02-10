@@ -17,7 +17,7 @@ import database
 # 导入全局状态和 Socket.IO 服务器
 from state import sio, sessions, connected_nodes, node_sockets, get_session
 
-# 导入共识算法函数
+# 导入共识算法函数 / 纯逻辑服务
 from consensus_engine import (
     get_quorum_threshold,
     get_local_quorum_threshold,
@@ -29,6 +29,9 @@ from consensus_engine import (
     is_honest
 )
 
+from consensus_service import ConsensusService
+from robot_agent import RobotAgent
+
 # 导入拓扑管理函数
 from topology_manager import (
     get_current_leader,
@@ -38,6 +41,10 @@ from topology_manager import (
 
 # 导入数据模型
 from models import SessionConfig, SessionInfo
+
+# Service Layer 实例
+consensus_service = ConsensusService()
+robot_agent = RobotAgent()
 
 
 # ==================== 网络辅助函数 ====================
@@ -554,54 +561,33 @@ async def trigger_robot_votes(session_id: str, view: int, phase: str, value: int
         print(f"视图已从 {view} 切换为 {session.get('current_view')}，取消本次自动投票")
         return
 
-    config = session["config"]
-    leader_id = get_current_leader(session)
-
     # Decide 阶段不需要再投票，直接结束共识
     if phase == "decide":
         print(f"进入 Decide 阶段，直接完成共识: view={view}")
-        await finalize_consensus(session_id, "Consensus Success", f"View {view} consensus reached")
+        await finalize_consensus(
+            session_id, "Consensus Success", f"View {view} consensus reached"
+        )
         return
 
-    # 遍历机器人节点，根据双层结构发送下一阶段投票（pre-commit / commit）
-    for robot_id in session.get("robot_nodes", []):
-        if robot_id == leader_id:
-            # Global Leader 一般不再给自己单独发 vote 消息
-            continue
-
-        # 获取节点拓扑信息，确定投票目标
-        node_info = get_topology_info(session, robot_id, view)
-        target_id = node_info['parent_id']
-        
-        # 如果是 Root (Global Leader)，不需要给自己投票
-        if node_info['role'] == 'root':
-            continue
-
-        current_round = session.get("current_round", 1)
-        vote_msg: Dict[str, Any] = {
-            "from": robot_id,
-            "to": target_id,
-            "type": "vote",
-            "value": value,
-            "phase": phase,              # 此处为新的阶段：pre-commit / commit
-            "view": view,
-            "round": current_round,  # 使用当前轮次标记消息
-            "timestamp": datetime.now().isoformat(),
-            "tampered": False,
-            "isRobot": True
-        }
-
-        # 写入会话消息历史
-        session["messages"]["vote"].append(vote_msg)
-
-        # 发送给上级对应的 socket（双层结构：Member -> Group Leader, Group Leader -> Global Leader）
+    # 使用 RobotAgent 生成机器人投票（纯逻辑），这里负责网络发送与聚合调用
+    votes = robot_agent.generate_votes_for_phase(session, view, phase, value)
+    for vote_msg in votes:
+        target_id = vote_msg["to"]
+        node_info = get_topology_info(session, vote_msg["from"], view)
         target_sid = node_sockets.get(session_id, {}).get(target_id)
+        count_message_sent(session_id, is_broadcast=False)
         if target_sid:
-            await sio.emit("message_received", vote_msg, room=target_sid)
-            role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
-            print(f"[双层 HotStuff] 机器人节点 {robot_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE({phase})")
+            if should_deliver_message(session_id):
+                await sio.emit("message_received", vote_msg, room=target_sid)
+                role_name = "Group Leader" if node_info["role"] == "member" else "Global Leader"
+                print(
+                    f"[双层 HotStuff] 机器人节点 {vote_msg['from']} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE({phase})"
+                )
+            else:
+                print(
+                    f"[网络模拟] 机器人节点 {vote_msg['from']} 的 VOTE({phase}) 消息被丢弃 (目标: {target_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)"
+                )
 
-        # 交给双层 HotStuff 投票聚合逻辑处理
         await handle_vote(session_id, vote_msg)
 
 
@@ -622,52 +608,28 @@ async def handle_proposal_message(session_id: str, proposal_msg: Dict[str, Any],
     session = get_session(session_id)
     if not session:
         return False
-    
+
+    result = consensus_service.handle_proposal(session, proposal_msg, node_id)
+
+    if not result["accepted"]:
+        # 缓冲或拒绝，记录原因
+        reason = result.get("reason")
+        if result.get("buffered"):
+            print(f"节点 {node_id}: Proposal 被缓冲 - {reason}")
+        else:
+            print(f"节点 {node_id}: Proposal 被拒绝 - {reason}")
+        return False
+
     proposal_view = proposal_msg.get("view", -1)
     proposal_value = proposal_msg.get("value")
-    proposal_qc = proposal_msg.get("qc")
-    proposer_id = proposal_msg.get("from")
-    current_view = session["current_view"]
-    
-    # 如果 Proposal 的 view 大于当前 view，需要缓冲（消息缓冲机制）
-    if proposal_view > current_view:
-        print(f"节点 {node_id}: Proposal 视图 {proposal_view} > 当前视图 {current_view}，缓冲消息")
-        buffer = session.setdefault("message_buffer", {})
-        if node_id not in buffer:
-            buffer[node_id] = {}
-        if proposal_view not in buffer[node_id]:
-            buffer[node_id][proposal_view] = []
-        buffer[node_id][proposal_view].append({"type": "proposal", "msg": proposal_msg})
-        return False
-    
-    # 如果 Proposal 的 view 小于当前 view，忽略旧消息
-    if proposal_view < current_view:
-        print(f"节点 {node_id}: 忽略旧 Proposal（View {proposal_view} < 当前 View {current_view}）")
-        return False
-    
-    # 验证消息来自当前视图的 Leader（HotStuff 星型拓扑要求）
-    leader_id = get_current_leader(session, proposal_view)
-    if proposer_id != leader_id:
-        print(f"节点 {node_id}: 拒绝 Proposal（来自非 Leader {proposer_id}，当前 Leader 是 {leader_id}）")
-        return False
-    
-    # HotStuff SafeNode 谓词检查（Safety 的核心机制）
-    if not check_safe_node(session, node_id, proposal_view, proposal_value, proposal_qc):
-        print(f"节点 {node_id}: SafeNode 检查失败，拒绝 Proposal（View {proposal_view}）")
-        return False
-    
-    # 通过 SafeNode 检查，节点发送 Prepare Vote
     print(f"节点 {node_id}: SafeNode 检查通过，发送 Vote（View {proposal_view}, Value {proposal_value}）")
-    
-    # 完善封装逻辑：SafeNode 检查通过后，触发投票动作
-    # 仅对机器人节点自动发送投票，人类节点通过 WebSocket 事件由前端发送
+
+    # 仅对机器人节点自动发送投票，人类节点仍由前端触发
     if node_id in session.get("robot_nodes", []):
         await handle_robot_prepare(session_id, node_id, proposal_value)
         return True
-    else:
-        # 人类节点：通过 WebSocket 事件通知前端发送 Vote
-        # 这里返回 True 表示可以通过 SafeNode 检查，前端可以发送 Vote
-        return True
+
+    return True
 
 async def handle_qc_message(session_id: str, qc_msg: Dict[str, Any], node_id: int):
     """
@@ -684,17 +646,13 @@ async def handle_qc_message(session_id: str, qc_msg: Dict[str, Any], node_id: in
     session = get_session(session_id)
     if not session:
         return
-    
+
+    consensus_service.handle_qc_for_node(session, qc_msg, node_id)
+
     qc = qc_msg.get("qc", {})
     qc_phase = qc.get("phase", "")
     qc_view = qc.get("view", -1)
-    
-    # 更新 prepareQC（用于 New-View 选择 HighQC）
-    update_node_prepare_qc(session, node_id, qc)
-    
-    # 如果收到 Commit 阶段的 QC，更新 lockedQC（HotStuff Safety 要求）
     if qc_phase == "commit":
-        update_node_locked_qc(session, node_id, qc)
         print(f"节点 {node_id}: 收到 Commit QC（View {qc_view}），已更新 lockedQC")
 
 async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
@@ -711,262 +669,124 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
     session = get_session(session_id)
     if not session:
         return
-    
+
     view = vote_message.get("view", session.get("current_view", 0))
     phase = vote_message.get("phase", "prepare")
-    voter = vote_message.get("from")
     value = vote_message.get("value")
-    current_view = session["current_view"]
-    is_group_vote = vote_message.get("is_group_vote", False)  # 是否为 GroupVote（聚合票）
-    vote_weight = vote_message.get("weight", 1)  # 投票权重（GroupVote 的权重 > 1）
-    
-    # 如果投票的 view 大于当前 view，缓冲消息（消息缓冲机制）
-    if view > current_view:
-        print(f"投票视图 {view} > 当前视图 {current_view}，缓冲消息")
-        buffer = session.setdefault("message_buffer", {})
-        if view not in buffer:
-            buffer[view] = []
-        buffer[view].append(vote_message)
+
+    result = consensus_service.handle_vote(session, vote_message)
+    status = result.get("status")
+
+    if status == "buffered":
+        print(f"投票视图 {view} > 当前视图 {session.get('current_view', 0)}，缓冲消息")
         return
-    
-    # 如果投票的 view 小于当前 view，忽略旧消息
-    if view < current_view:
-        print(f"忽略旧投票（View {view} < 当前 View {current_view}）")
+    if status == "ignored":
+        print(f"忽略旧投票或非法角色投票: view={view}, phase={phase}")
         return
-    
-    # 获取投票者的拓扑信息
-    voter_info = get_topology_info(session, voter, view)
-    voter_role = voter_info['role']
-    target_id = vote_message.get("to")
-    
-    # ========== Case A: Member 投票给 Group Leader ==========
-    if voter_role == 'member':
-        group_leader_id = voter_info['parent_id']
-        if target_id != group_leader_id:
-            print(f"Member {voter} 投票目标错误（目标: {target_id}, 应为 Group Leader: {group_leader_id}），忽略")
-            return
-        
-        # 存储到组内投票池
-        key = (view, phase, value, group_leader_id)  # 添加 group_leader_id 区分不同组
-        pending_group_votes = session.setdefault("pending_group_votes", {})
-        group_voters = pending_group_votes.setdefault(key, set())
-        group_voters.add(voter)
-        
-        # 检查组内阈值
-        group_size = voter_info['group_size']
-        local_threshold = get_local_quorum_threshold(session, group_size)
-        
-        if len(group_voters) < local_threshold:
-            print(f"[双层 HotStuff] Group Leader {group_leader_id} 收到组员 {voter} 投票: phase={phase}, view={view}, 组内累积 {len(group_voters)}/{local_threshold}")
-            return
-        
-        # 组内达到阈值，Group Leader 生成 GroupVote 发送给 Global Leader
-        print(f"[双层 HotStuff] Group Leader {group_leader_id} 收到组内 {len(group_voters)} 票（阈值 {local_threshold}），生成 GroupVote 发送给 Global Leader")
-        
-        global_leader_id = get_current_leader(session, view)
-        current_round = session.get("current_round", 1)
-        group_vote_message = {
-            "from": group_leader_id,
-            "to": global_leader_id,
-            "type": "vote",
-            "value": value,
-            "phase": phase,
-            "view": view,
-            "round": current_round,  # 使用当前轮次标记消息
-            "is_group_vote": True,  # 标记为 GroupVote
-            "weight": len(group_voters),  # 权重 = 组内投票数
-            "group_id": voter_info['group_id'],
-            "group_voters": list(group_voters),  # 记录组内投票者（用于统计）
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        session["messages"]["vote"].append(group_vote_message)
-        
-        # 发送给 Global Leader
+
+    # 如果 Service 生成了 GroupVote，需要网络层路由到 Global Leader
+    group_vote = result.get("group_vote")
+    if group_vote:
+        global_leader_id = group_vote["to"]
         global_leader_sid = node_sockets.get(session_id, {}).get(global_leader_id)
+        count_message_sent(session_id, is_broadcast=False)
         if global_leader_sid:
             if should_deliver_message(session_id):
-                await sio.emit('message_received', group_vote_message, room=global_leader_sid)
-                print(f"[双层 HotStuff] Group Leader {group_leader_id} 向 Global Leader {global_leader_id} 发送 GroupVote (权重={len(group_voters)})")
+                await sio.emit("message_received", group_vote, room=global_leader_sid)
+                print(
+                    f"[双层 HotStuff] Group Leader {group_vote['from']} 向 Global Leader {global_leader_id} 发送 GroupVote (权重={group_vote.get('weight')})"
+                )
             else:
-                print(f"[网络模拟] Group Leader {group_leader_id} 的 GroupVote 消息被丢弃 (目标: Global Leader {global_leader_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
-        
-        # 递归处理 GroupVote（作为 Global Leader 收到的投票）
-        await handle_vote(session_id, group_vote_message)
-        return
-    
-    # ========== Case B: Group Leader 投票给 Global Leader（或 Global Leader 自己投票） ==========
-    global_leader_id = get_current_leader(session, view)
-    
-    # 验证投票目标
-    if voter_role == 'group_leader':
-        if target_id != global_leader_id:
-            print(f"Group Leader {voter} 投票目标错误（目标: {target_id}, 应为 Global Leader: {global_leader_id}），忽略")
-            return
-    elif voter_role == 'root':
-        # Global Leader 自己也可以投票（但通常不需要）
-        if target_id != global_leader_id:
-            print(f"Global Leader {voter} 投票目标错误，忽略")
-            return
-    else:
-        print(f"未知角色 {voter_role} 的投票，忽略")
-        return
-    
-    # Global Leader 收集投票（包括 GroupVote 和直接投票）
-    key = (view, phase, value)
-    pending = session.setdefault("pending_votes", {})
-    
-    # 如果是 GroupVote，累加权重；否则权重为 1
-    if is_group_vote:
-        # GroupVote: 累加权重
-        if key not in pending:
-            pending[key] = {"total_weight": 0, "group_votes": []}
-        pending[key]["total_weight"] += vote_weight
-        pending[key]["group_votes"].append({
-            "from": voter,
-            "weight": vote_weight,
-            "group_voters": vote_message.get("group_voters", [])
-        })
-        print(f"[双层 HotStuff] Global Leader {global_leader_id} 收到 Group Leader {voter} 的 GroupVote (权重={vote_weight}), 总权重={pending[key]['total_weight']}")
-    else:
-        # 直接投票（权重为 1）
-        if key not in pending:
-            pending[key] = {"total_weight": 0, "group_votes": []}
-        pending[key]["total_weight"] += 1
-        pending[key]["group_votes"].append({
-            "from": voter,
-            "weight": 1,
-            "group_voters": [voter]
-        })
-        print(f"[双层 HotStuff] Global Leader {global_leader_id} 收到节点 {voter} 的直接投票, 总权重={pending[key]['total_weight']}")
-    
-    # ========== 防止重复处理：检查当前会话的 phase 是否已经翻篇 ==========
-    current_session_phase = session.get("phase", "prepare")
-    if phase != current_session_phase:
-        print(f"[防重复] 投票的 phase ({phase}) 与当前会话 phase ({current_session_phase}) 不匹配，忽略（该阶段已完成或尚未开始）")
-        return
-    
-    # 检查全局阈值（基于权重）
-    threshold = get_quorum_threshold(session)
-    total_weight = pending[key]["total_weight"]
-    
-    if total_weight < threshold:
-        print(f"[双层 HotStuff] 投票累积中: phase={phase}, view={view}, 总权重 {total_weight}/{threshold}")
-        return
-    
-    # 达到阈值，生成 QC
-    # 收集所有投票者（从 GroupVote 中提取）
-    all_voters = set()
-    for gv in pending[key]["group_votes"]:
-        all_voters.update(gv.get("group_voters", [gv["from"]]))
-    
-    qc = {
-        "phase": phase,
-        "view": view,
-        "signers": list(all_voters),
-        "value": value,
-        "total_weight": total_weight,  # 记录总权重
-        "is_multi_layer": True  # 标记为双层结构
-    }
-    
-    next_phase = get_next_phase(phase)
-    session["phase"] = next_phase
-    session["phase_step"] += 1
-    
-    current_round = session.get("current_round", 1)
-    qc_message = {
-        "from": global_leader_id,
-        "to": "group_leaders",  # 双层结构：只发给 Group Leaders
-        "type": "qc",
-        "phase": phase,
-        "next_phase": next_phase,
-        "view": view,
-        "round": current_round,  # 使用当前轮次标记消息
-        "qc": qc,
-        "timestamp": datetime.now().isoformat()
-    }
-    
-    # 将完整的 QC 广播消息写入会话历史
-    session["messages"]["qc"].append(qc_message)
-    
-    # ========== 双层广播：Global Leader -> Group Leaders -> Members ==========
-    n = session["config"]["nodeCount"]
-    branch_count = session["config"].get("branchCount", 2)
-    group_size = max(1, n // branch_count)
-    
-    # 第一步：Global Leader 发送给所有 Group Leaders
-    group_leaders = []
-    for gid in range(branch_count):
-        group_start_id = gid * group_size
-        if group_start_id < n and group_start_id != global_leader_id:  # 排除 Global Leader 自己
-            group_leaders.append(group_start_id)
-    
-    # 发送给 Group Leaders（逻辑上发送给所有 Group Leaders）
-    if group_leaders:
-        count_message_sent(session_id, is_broadcast=False, target_count=len(group_leaders))
-    for gl_id in group_leaders:
-        gl_sid = node_sockets.get(session_id, {}).get(gl_id)
-        if gl_sid:
-            if should_deliver_message(session_id):
-                await sio.emit('message_received', qc_message, room=gl_sid)
-            else:
-                print(f"[网络模拟] QC 消息被丢弃 (目标: Group Leader {gl_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
-    
-    # 第二步：Group Leaders 转发给组内 Members（按组统计目标成员数）
-    for gl_id in group_leaders:
-        gl_info = get_topology_info(session, gl_id, view)
-        group_id = gl_info['group_id']
-        group_start_id = group_id * group_size
-        group_end_id = min((group_id + 1) * group_size, n)
-        
-        # Group Leader 转发给组内所有 Members
-        forward_message = qc_message.copy()
-        forward_message["from"] = gl_id
-        forward_message["to"] = "group_members"
-        
-        # 逻辑目标成员总数（不依赖 member_sid）
-        target_member_count = max(group_end_id - (group_start_id + 1), 0)
-        if target_member_count > 0:
-            count_message_sent(session_id, is_broadcast=False, target_count=target_member_count)
-        
-        for member_id in range(group_start_id + 1, group_end_id):  # +1 因为 Group Leader 自己不需要转发
-            member_sid = node_sockets.get(session_id, {}).get(member_id)
-            if member_sid:
-                if should_deliver_message(session_id):
-                    await sio.emit('message_received', forward_message, room=member_sid)
-                else:
-                    print(f"[网络模拟] QC 转发消息被丢弃 (目标: Member {member_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
-    
-    # 也发送给所有节点（用于前端展示，但实际路由是分层的）
-    await sio.emit('message_received', qc_message, room=session_id)
-    
-    await sio.emit('phase_update', {
-        "phase": next_phase,
-        "step": session["phase_step"],
-        "leader": global_leader_id,
-        "view": view
-    }, room=session_id)
-    
-    print(f"[双层 HotStuff] Global Leader {global_leader_id} 收到总权重 {total_weight}（阈值 {threshold}），生成 {phase} QC 并进入 {next_phase} 阶段（View {view}）")
-    print(f"[双层 HotStuff] QC 通过分层广播：Global Leader -> {len(group_leaders)} Group Leaders -> Members")
-    
-    # 通知所有节点处理 QC（更新 prepareQC/lockedQC）
-    for node_id in range(n):
-        await handle_qc_message(session_id, qc_message, node_id)
-    
-    # 清理已处理的投票
-    pending[key] = {"total_weight": total_weight, "group_votes": pending[key]["group_votes"]}
+                print(
+                    f"[网络模拟] Group Leader {group_vote['from']} 的 GroupVote 消息被丢弃 (目标: Global Leader {global_leader_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)"
+                )
 
-    # HotStuff 多阶段自动推进：在进入下一阶段后，调度机器人自动投票
-    # next_phase 可能是 pre-commit / commit / decide
-    if next_phase == "decide":
-        # Decide 阶段完成，达成共识
-        await finalize_consensus(session_id, "Consensus Success", f"View {view} consensus reached")
-    else:
-        try:
-            asyncio.create_task(trigger_robot_votes(session_id, view, next_phase, value))
-        except RuntimeError as e:
-            print(f"调度 trigger_robot_votes 失败: {e}")
+    # 如果生成了 QC，则按双层拓扑进行广播，并驱动后续阶段
+    qc_message = result.get("qc_message")
+    routing = result.get("routing")
+    if qc_message and routing:
+        global_leader_id = routing["global_leader"]
+        group_leaders = routing["group_leaders"]
+        members_by_group_leader = routing["members_by_group_leader"]
+
+        n = session["config"]["nodeCount"]
+
+        # Global Leader -> Group Leaders
+        if group_leaders:
+            count_message_sent(session_id, is_broadcast=False, target_count=len(group_leaders))
+        for gl_id in group_leaders:
+            gl_sid = node_sockets.get(session_id, {}).get(gl_id)
+            if gl_sid:
+                if should_deliver_message(session_id):
+                    await sio.emit("message_received", qc_message, room=gl_sid)
+                else:
+                    print(
+                        f"[网络模拟] QC 消息被丢弃 (目标: Group Leader {gl_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)"
+                    )
+
+        # Group Leaders -> Members
+        for gl_id, members in members_by_group_leader.items():
+            forward_message = qc_message.copy()
+            forward_message["from"] = gl_id
+            forward_message["to"] = "group_members"
+
+            target_member_count = max(len(members), 0)
+            if target_member_count > 0:
+                count_message_sent(
+                    session_id, is_broadcast=False, target_count=target_member_count
+                )
+
+            for member_id in members:
+                if member_id < 0 or member_id >= n:
+                    continue
+                member_sid = node_sockets.get(session_id, {}).get(member_id)
+                if member_sid:
+                    if should_deliver_message(session_id):
+                        await sio.emit("message_received", forward_message, room=member_sid)
+                    else:
+                        print(
+                            f"[网络模拟] QC 转发消息被丢弃 (目标: Member {member_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)"
+                        )
+
+        # 也发送给所有节点（用于前端展示）
+        await sio.emit("message_received", qc_message, room=session_id)
+
+        await sio.emit(
+            "phase_update",
+            {
+                "phase": qc_message.get("next_phase"),
+                "step": session.get("phase_step", 0),
+                "leader": global_leader_id,
+                "view": qc_message.get("view"),
+            },
+            room=session_id,
+        )
+
+        print(
+            f"[双层 HotStuff] Global Leader {global_leader_id} 生成 {phase} QC 并进入 {qc_message.get('next_phase')} 阶段（View {view}）"
+        )
+        print(
+            f"[双层 HotStuff] QC 通过分层广播：Global Leader -> {len(group_leaders)} Group Leaders -> Members"
+        )
+
+        # 所有节点根据 QC 更新本地状态
+        consensus_service.handle_qc_for_all_nodes(session, qc_message)
+
+        # HotStuff 多阶段自动推进
+        next_phase = qc_message.get("next_phase")
+        if next_phase == "decide":
+            await finalize_consensus(
+                session_id, "Consensus Success", f"View {view} consensus reached"
+            )
+        else:
+            try:
+                asyncio.create_task(
+                    trigger_robot_votes(
+                        session_id, qc_message.get("view"), next_phase, qc_message["qc"]["value"]
+                    )
+                )
+            except RuntimeError as e:
+                print(f"调度 trigger_robot_votes 失败: {e}")
 
 
 # ==================== 共识逻辑 ====================
@@ -1135,201 +955,49 @@ async def finalize_consensus(session_id: str, status: str = "Consensus Completed
     session = get_session(session_id)
     if not session:
         return
-    
-    # 防止重复调用（基于 view）
+
     current_view = session["current_view"]
     if session.get("consensus_finalized_view") == current_view:
         print(f"View {current_view} 共识已完成，跳过重复调用")
         return
-    
-    session["consensus_finalized_view"] = current_view
-    print(f"View {current_view} 共识完成处理开始")
-    
-    # 取消超时任务
+
+    # 取消超时任务（副作用仍由网络层负责）
     if session.get("timeout_task"):
         session["timeout_task"].cancel()
         print(f"View {current_view} 共识已完成，取消超时任务")
-    
-    session["phase"] = "completed"
-    session["phase_step"] = 4  # Fix: Set to 4 to match frontend 100% progress (4 steps total)
-    session["status"] = "completed"
-    
-    config = session["config"]
-    
-    # ================= 通信复杂度统计报告（4种算法对比） =================
-    network_stats = session.get("network_stats", {})
-    actual_messages = network_stats.get("total_messages_sent", 0)
-    n = config["nodeCount"]
-    branch_count = config.get("branchCount", 2)  # 分组数 K（可能为 0 或负数，后面统一归一化）
-    
-    # 边界处理：确保 K >= 1，并计算分组大小
-    k = max(1, branch_count)
-    group_size = n // k if k > 0 else n
-    
-    # ========== 影子计算 (Shadow Calculation)：基于当前 n、k 的“推演实际值” ==========
-    # 1. Shadow PBFT: 全网广播（这里只考虑 Prepare + Commit 两个阶段）
-    shadow_pbft_actual = 2 * n * (n - 1)
-    
-    # 2. Shadow Pure HotStuff: 星型广播（4 个阶段，每阶段 2×(N-1) 条消息）
-    #    4 * (Leader 广播 + 节点回复)
-    shadow_hotstuff_actual = 8 * (n - 1)
-    
-    # 3. Shadow Multi-Layer PBFT: 分层全网广播
-    #    顶层：K 个组长之间 PBFT -> 2 * K * (K - 1)
-    #    底层：K 个组，每组 group_size 个节点 -> K * 2 * group_size * (group_size - 1)
-    shadow_multilayer_actual = (2 * k * (k - 1)) + (k * 2 * group_size * (group_size - 1))
-    
-    # ========== 计算4种算法的理论消息数 (Theoretical) ==========
-    
-    # Double-Layer HotStuff (本系统) 理论值：4阶段 * 2层 * N
-    hotstuff_double_actual = actual_messages
-    theoretical_double_hotstuff = 8 * n
-    
-    # 传统 PBFT (Pure PBFT) - O(N^2)
-    theoretical_pbft = 2 * n * n
-    
-    # 传统 HotStuff (Pure HotStuff) - O(N)
-    theoretical_hotstuff = 4 * n
-    
-    # 双层 PBFT (Multi-Layer PBFT) - 分层 PBFT: O(K² + N²/K)
-    theoretical_multilayer = 2 * k * k + 2 * n * n // k
-    
-    # ========== 计算优化倍数 ==========
-    # 双层 HotStuff 相对于其他算法的优化倍数（基于理论值）
-    optimization_vs_pbft_pure = theoretical_pbft / hotstuff_double_actual if hotstuff_double_actual > 0 else 0.0
-    optimization_vs_hotstuff_pure = theoretical_hotstuff / hotstuff_double_actual if hotstuff_double_actual > 0 else 0.0
-    optimization_vs_pbft_multi = theoretical_multilayer / hotstuff_double_actual if hotstuff_double_actual > 0 else 0.0
-    
-    # ========== 构建复杂度对比数据 ==========
-    complexity_comparison = {
-        "double_hotstuff": {
-            "name": "Double-Layer HotStuff (System)",
-            "theoretical": theoretical_double_hotstuff,
-            "actual": hotstuff_double_actual,
-            "complexity": "O(N)",
-            "is_current": True
-        },
-        "pbft_pure": {
-            "name": "PBFT (Pure)",
-            "theoretical": theoretical_pbft,
-            "actual": shadow_pbft_actual,
-            "complexity": "O(N²)",
-            "optimization_ratio": optimization_vs_pbft_pure
-        },
-        "hotstuff_pure": {
-            "name": "HotStuff (Pure)",
-            "theoretical": theoretical_hotstuff,
-            "actual": shadow_hotstuff_actual,
-            "complexity": "O(N)",
-            "optimization_ratio": optimization_vs_hotstuff_pure
-        },
-        "pbft_multi_layer": {
-            "name": "PBFT (Multi-Layer)",
-            "theoretical": theoretical_multilayer,
-            "actual": shadow_multilayer_actual,
-            "complexity": "O(K² + N²/K)",
-            "optimization_ratio": optimization_vs_pbft_multi
-        }
-    }
-    
-    # 创建共识结果
-    consensus_result = {
-        "status": status,
-        "description": description,
-        "stats": {
-            "expected_nodes": config["nodeCount"],
-            "expected_prepare_nodes": config["nodeCount"] - 1,
-            "total_messages": len(session["messages"]["prepare"]) + len(session["messages"]["commit"]),
-            "complexity_comparison": complexity_comparison,
-            "network_stats": {
-                "actual_messages": actual_messages,
-                "node_count": n,
-                "branch_count": branch_count
-            }
-        }
-    }
-    
-    session["consensus_result"] = consensus_result
-    
-    # ========== 打印详细报告 ==========
-    print("\n" + "=" * 80)
-    print("📊 共识算法通信复杂度对比分析报告")
-    print("=" * 80)
-    print("-" * 80)
-    print(f"[统计说明]")
-    current_round = session.get("current_round", 1)
-    start_view = session.get("start_view_of_round", 0)
-    current_view = session.get("current_view", 0)
-    view_change_count = max(0, current_view - start_view)
-    print(f"  • 当前轮次 (Round): {current_round}")
-    print(f"  • 经历视图 (Views): {current_view} (View Change 次数: {view_change_count})")
-    print(f"  • 统计范围: 从 Pre-Prepare 到 Decide 的完整共识周期")
-    print(f"  • 注意: 本系统演示的是 Basic HotStuff (分阶段提交)。")
-    print(f"         如果是 Chained HotStuff (流水线模式)，")
-    print(f"         Prepare QC 同时也是下一视图的 Pre-Prepare 消息，")
-    print(f"         其摊还通信复杂度会进一步降低。")
-    print("-" * 80)
-    print(f"[配置] 节点总数 N = {n}, 分组数 K = {branch_count}")
-    print(f"[实测] 双层 HotStuff 实际消息数: {hotstuff_double_actual}")
-    print("-" * 80)
-    print(f"[算法对比] (Theoretical vs Actual/Shadow)")
-    print(f"{'算法':<28}{'Theoretical':>16}{'Actual/Shadow':>18}{'复杂度':>12}")
-    print("-" * 80)
-    print(f"{'Double-Layer HotStuff':<28}{theoretical_double_hotstuff:>16}{hotstuff_double_actual:>18}{'O(N)':>12}")
-    print(f"{'PBFT (Pure)':<28}{theoretical_pbft:>16}{shadow_pbft_actual:>18}{'O(N²)':>12}")
-    print(f"{'HotStuff (Pure)':<28}{theoretical_hotstuff:>16}{shadow_hotstuff_actual:>18}{'O(N)':>12}")
-    print(f"{'PBFT (Multi-Layer)':<28}{theoretical_multilayer:>16}{shadow_multilayer_actual:>18}{'O(K²+N²/K)':>12}")
-    print("-" * 80)
-    if hotstuff_double_actual > 0:
-        print(f"[优化倍数] 双层 HotStuff 相对于:")
-        print(f"  • 传统 PBFT:        {optimization_vs_pbft_pure:>8.2f}x")
-        print(f"  • 传统 HotStuff:    {optimization_vs_hotstuff_pure:>8.2f}x")
-        print(f"  • 双层 PBFT:        {optimization_vs_pbft_multi:>8.2f}x")
-        print(f"💡 双层结构优势: 通过分组聚合，Global Leader 只需处理 K 个 GroupVote，")
-        print(f"   而不是 N 个单独投票，显著降低了全局 Leader 的通信压力")
-    else:
-        print("⚠️  警告: 未统计到任何共识消息，无法计算优化倍数")
-    print("=" * 80 + "\n")
-    
-    # 广播共识结果
-    print(f"准备发送共识结果: {consensus_result}")
-    await sio.emit('consensus_result', consensus_result, room=session_id)
-    print(f"已发送共识结果到房间: {session_id}")
-    
-    # 更新阶段
-    await sio.emit('phase_update', {
-        "phase": "completed",
-        "step": 4,  # Fix: Set to 4 to match frontend 100% progress
-        "isMyTurn": False
-    }, room=session_id)
-    
-    print(f"会话 {session_id} View {session['current_view']} 共识完成: {status}")
-    
-    # 保存共识历史（使用 round 和 view 作为标识，包含完整的 stats 数据）
-    current_round = session.get("current_round", 1)
-    history_item = {
-        "round": current_round,
-        "view": session["current_view"],
-        "status": status,
-        "description": description,
-        "stats": consensus_result.get("stats"),  # 保存完整的统计数据，包括 complexity_comparison 和 network_stats
-        "timestamp": datetime.now().isoformat()
-    }
-    session["consensus_history"].append(history_item)
 
-    # 将最新历史记录和会话状态持久化
+    # 交给 ConsensusService 计算并更新共识结果与 Shadow 复杂度
+    result = consensus_service.finalize_consensus_state(session, status, description)
+    consensus_result = result["consensus_result"]
+    history_item = result["history_item"]
+
+    # 控制台报告已在 Service 内部打印，这里只负责网络广播和持久化
+    print(f"准备发送共识结果: {consensus_result}")
+    await sio.emit("consensus_result", consensus_result, room=session_id)
+    print(f"已发送共识结果到房间: {session_id}")
+
+    await sio.emit(
+        "phase_update",
+        {
+            "phase": "completed",
+            "step": 4,
+            "isMyTurn": False,
+        },
+        room=session_id,
+    )
+
+    print(f"会话 {session_id} View {session['current_view']} 共识完成: {status}")
+
+    # 持久化最新历史记录和会话状态
     try:
         database.append_history(session_id, history_item)
         database.upsert_session(session_id, session)
     except Exception as e:
         print(f"[database] 保存共识历史/会话状态失败: session_id={session_id}, error={e}")
-    
-    # HotStuff 中，一次共识完成不代表需要"下一轮"
-    # 如果需要继续共识，应该通过 New-View 机制开始新的 View
-    # 这里我们保持会话状态为 completed，不再自动启动下一轮
+
     print(f"View {session['current_view']} 共识完成，会话状态设为 completed")
-    
-    # 开启自动多轮演示模式：10秒后开始下一轮
+
+    # 自动多轮演示：10 秒后开始下一轮
     print(f"当前轮次共识完成，10秒后自动开始下一轮...")
     asyncio.create_task(start_next_round(session_id))
 
@@ -1426,21 +1094,10 @@ async def trigger_view_change(session_id: str, old_view: int):
     session["current_view"] = new_view
     session["leader_id"] = next_leader_id
     
-    # ========== 重置所有机器人节点的投票状态（修复 Timeout Loop） ==========
-    # 在视图切换时，必须重置机器人的 sent_prepare/sent_commit 标志
-    # 否则机器人会误以为自己在新 View 中已投票，导致拒绝再次投票
+    # 重置所有机器人节点的投票状态（交给 RobotAgent 管理）
     print(f"[View Change] 重置所有机器人节点的投票状态...")
+    robot_agent.reset_states_for_view_change(session)
     for robot_id in session.get("robot_nodes", []):
-        if robot_id not in session["robot_node_states"]:
-            session["robot_node_states"][robot_id] = {}
-        
-        session["robot_node_states"][robot_id] = {
-            "received_pre_prepare": False,
-            "received_prepare_count": 0,
-            "received_commit_count": 0,
-            "sent_prepare": False,  # 关键：重置此标志，允许在新 View 中重新投票
-            "sent_commit": False
-        }
         print(f"  机器人节点 {robot_id}: 投票状态已重置")
     
     # 所有节点发送 NEW-VIEW 消息给 Next Leader
@@ -1549,14 +1206,7 @@ async def start_next_round(session_id: str):
     print(f"第{current_round}轮开始 - 当前人类节点: {session['human_nodes']}")
     
     # 重置机器人节点状态（重置所有机器人节点的投票状态，但保持节点身份不变）
-    for robot_id in session["robot_nodes"]:
-        session["robot_node_states"][robot_id] = {
-            "received_pre_prepare": False,
-            "received_prepare_count": 0,
-            "received_commit_count": 0,
-            "sent_prepare": False,
-            "sent_commit": False
-        }
+    robot_agent.reset_states_for_new_round(session)
     
     print(f"会话 {session_id} 开始第{current_round}轮共识")
     
@@ -1716,124 +1366,102 @@ async def robot_send_pre_prepare(session_id: str, highQC: Optional[Dict] = None)
     session = get_session(session_id)
     if not session:
         return
-    
-    # 防止重复调用（基于 view）
-    current_view = session["current_view"]
-    if session.get("last_pre_prepare_view") == current_view:
-        print(f"View {current_view} 的 Proposal 已发送，跳过重复调用")
+
+    # 使用 RobotAgent 生成 Proposal（纯逻辑）
+    message = robot_agent.generate_proposal(session, highQC)
+    if message is None:
+        current_view = session.get("current_view", 0)
+        proposer_id = get_current_leader(session)
+        print(f"Leader {proposer_id} 在 View {current_view} 不是机器人节点，等待人类操作")
         return
-    
-    session["last_pre_prepare_view"] = current_view
-    
+
+    current_view = message["view"]
+    proposer_id = message["from"]
     config = session["config"]
-    proposer_id = get_current_leader(session)  # 当前视图的Leader作为提议者
-    
-    # 只有当 Leader 是机器人节点时才自动发送
-    if proposer_id not in session.get("robot_nodes", []):
-        print(f"Leader {proposer_id} 是人类节点，等待人类操作")
-        return
-    
-    # 如果提供了 highQC，使用 highQC 的 value；否则使用配置的 proposalValue
-    proposal_value = config["proposalValue"]
-    if highQC:
-        proposal_value = highQC.get("value", config["proposalValue"])
-    
-    # 发送 Proposal 消息（双层 HotStuff：Global Leader -> Group Leaders -> Members）
-    current_round = session.get("current_round", 1)
-    message = {
-        "from": proposer_id,
-        "to": "group_leaders",  # 双层结构：只发给 Group Leaders
-        "type": "pre_prepare",
-        "value": proposal_value,
-        "phase": "prepare",  # HotStuff 中 Proposal 开启 Prepare 阶段
-        "view": current_view,
-        "round": current_round,  # 使用当前轮次标记消息
-        "qc": highQC,  # 携带 HighQC（如果有）
-        "timestamp": datetime.now().isoformat(),
-        "tampered": False,
-        "isRobot": True
-    }
-    
-    session["messages"]["pre_prepare"].append(message)
-    
+
     # ========== 双层广播：Global Leader -> Group Leaders -> Members ==========
     n = config["nodeCount"]
     branch_count = config.get("branchCount", 2)
     group_size = max(1, n // branch_count)
-    
-    # 第一步：Global Leader 发送给所有 Group Leaders
+
     group_leaders = []
     for gid in range(branch_count):
         group_start_id = gid * group_size
-        if group_start_id < n and group_start_id != proposer_id:  # 排除 Global Leader 自己
+        if group_start_id < n and group_start_id != proposer_id:
             group_leaders.append(group_start_id)
-    
-    # 发送给 Group Leaders（逻辑上发送给所有 Group Leaders）
+
     if group_leaders:
         count_message_sent(session_id, is_broadcast=False, target_count=len(group_leaders))
     for gl_id in group_leaders:
         gl_sid = node_sockets.get(session_id, {}).get(gl_id)
         if gl_sid:
             if should_deliver_message(session_id):
-                await sio.emit('message_received', message, room=gl_sid)
+                await sio.emit("message_received", message, room=gl_sid)
             else:
-                print(f"[网络模拟] Proposal 消息被丢弃 (目标: Group Leader {gl_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
-    
-    # 第二步：Group Leaders 转发给组内 Members
+                print(
+                    f"[网络模拟] Proposal 消息被丢弃 (目标: Group Leader {gl_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)"
+                )
+
     for gl_id in group_leaders:
         gl_info = get_topology_info(session, gl_id, current_view)
-        group_id = gl_info['group_id']
+        group_id = gl_info["group_id"]
         group_start_id = group_id * group_size
         group_end_id = min((group_id + 1) * group_size, n)
-        
-        # Group Leader 转发给组内所有 Members
+
         forward_message = message.copy()
         forward_message["from"] = gl_id
         forward_message["to"] = "group_members"
-        
-        # 逻辑目标成员总数（不依赖 member_sid）
+
         target_member_count = max(group_end_id - (group_start_id + 1), 0)
         if target_member_count > 0:
             count_message_sent(session_id, is_broadcast=False, target_count=target_member_count)
-        
-        for member_id in range(group_start_id + 1, group_end_id):  # +1 因为 Group Leader 自己不需要转发
+
+        for member_id in range(group_start_id + 1, group_end_id):
             member_sid = node_sockets.get(session_id, {}).get(member_id)
             if member_sid:
                 if should_deliver_message(session_id):
-                    await sio.emit('message_received', forward_message, room=member_sid)
+                    await sio.emit("message_received", forward_message, room=member_sid)
                 else:
-                    print(f"[网络模拟] Proposal 转发消息被丢弃 (目标: Member {member_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
-    
-    # 也发送给所有节点（用于前端展示，但实际路由是分层的）
-    await sio.emit('message_received', message, room=session_id)
-    
-    print(f"[双层 HotStuff] Global Leader {proposer_id} (View {current_view}) 发送了 Proposal 消息: value={proposal_value}, highQC.view={highQC.get('view') if highQC else None}")
-    print(f"[双层 HotStuff] Proposal 通过分层广播：Global Leader -> {len(group_leaders)} Group Leaders -> Members")
-    
+                    print(
+                        f"[网络模拟] Proposal 转发消息被丢弃 (目标: Member {member_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)"
+                    )
+
+    await sio.emit("message_received", message, room=session_id)
+
+    print(
+        f"[双层 HotStuff] Global Leader {proposer_id} (View {current_view}) 发送了 Proposal 消息: "
+        f"value={message['value']}, highQC.view={message['qc'].get('view') if message.get('qc') else None}"
+    )
+    print(
+        f"[双层 HotStuff] Proposal 通过分层广播：Global Leader -> {len(group_leaders)} Group Leaders -> Members"
+    )
+
     # 进入准备阶段
     await asyncio.sleep(1)
     session["phase"] = "prepare"
     session["phase_step"] = 1
-    
-    await sio.emit('phase_update', {
-        "phase": "prepare",
-        "step": 1,
-        "leader": proposer_id,
-        "view": current_view
-    }, room=session_id)
-    
+
+    await sio.emit(
+        "phase_update",
+        {
+            "phase": "prepare",
+            "step": 1,
+            "leader": proposer_id,
+            "view": current_view,
+        },
+        room=session_id,
+    )
+
     print(f"会话 {session_id} View {current_view} 进入准备阶段")
-    
-    # 启动超时任务（超时后触发 View Change，而不是结束）
+
+    # 启动超时任务（超时后触发 View Change）
     timeout_task = asyncio.create_task(handle_consensus_timeout(session_id, current_view))
     session["timeout_task"] = timeout_task
     print(f"View {current_view} 共识超时检查已启动（40秒后触发 View Change）")
-    
+
     # 标记所有机器人节点已收到 Proposal（它们会自动进行 SafeNode 检查并投票）
-    for robot_id in session.get("robot_nodes", []):
-        if robot_id != proposer_id:  # Leader 不给自己投票
-            session["robot_node_states"][robot_id]["received_pre_prepare"] = True
-    
+    robot_agent.mark_proposal_received_by_robots(session, proposer_id)
+
     # 机器人节点自动发送 Prepare 投票（10秒后，会进行 SafeNode 检查）
     asyncio.create_task(robot_send_prepare_messages(session_id))
 
@@ -1846,40 +1474,36 @@ async def robot_send_prepare_messages(session_id: str):
     session = get_session(session_id)
     if not session:
         return
-    
+
     current_view = session["current_view"]
-    
+
     # 找到最新的 Proposal 消息
     proposal_msgs = [m for m in session["messages"]["pre_prepare"] if m.get("view") == current_view]
     if not proposal_msgs:
         print(f"View {current_view}: 未找到 Proposal 消息，机器人节点不投票")
         return
-    
-    proposal_msg = proposal_msgs[-1]  # 取最新的
-    
-    # 等待10秒后发送准备阶段投票
+
+    proposal_msg = proposal_msgs[-1]
+
     print(f"View {current_view}: 机器人节点将在10秒后发送 VOTE(prepare) 给 Leader")
     await asyncio.sleep(10)
-    
+
     session = get_session(session_id)
     if not session:
         return
-    
-    # 检查视图是否改变
+
     if session["current_view"] != current_view:
         print(f"视图已改变（{current_view} -> {session['current_view']}），放弃发送投票")
         return
-    
-    # 所有机器人验证者（除了Leader）通过 handle_proposal_message 进行 SafeNode 检查并发送投票
+
     leader_id = get_current_leader(session, current_view)
     for robot_id in session.get("robot_nodes", []):
-        if robot_id == leader_id:  # Leader不给自己投票
+        if robot_id == leader_id:
             continue
-        
+
         if session["robot_node_states"][robot_id].get("sent_prepare"):
-            continue  # 已经发送过了
-        
-        # 直接调用 handle_proposal_message 进行处理（激活死代码，复用逻辑）
+            continue
+
         await handle_proposal_message(session_id, proposal_msg, robot_id)
         session["robot_node_states"][robot_id]["sent_prepare"] = True
 
@@ -1897,49 +1521,32 @@ async def handle_robot_prepare(session_id: str, robot_id: int, value: int):
     session = get_session(session_id)
     if not session:
         return
-    
-    current_view = session["current_view"]
-    
-    # 获取节点拓扑信息，确定投票目标
-    node_info = get_topology_info(session, robot_id, current_view)
-    target_id = node_info['parent_id']
-    
-    # 如果是 Root (Global Leader)，不需要给自己投票
-    if node_info['role'] == 'root':
+
+    # 使用 RobotAgent 生成投票（纯逻辑）
+    vote_message = robot_agent.generate_vote_for_robot(session, robot_id, "prepare", value)
+    if vote_message is None:
         print(f"[双层 HotStuff] Global Leader {robot_id} 不需要给自己投票")
         return
-    
+
+    target_id = vote_message["to"]
+    node_info = get_topology_info(session, robot_id, session["current_view"])
     target_sid = node_sockets.get(session_id, {}).get(target_id)
-    
-    current_round = session.get("current_round", 1)
-    vote_message = {
-        "from": robot_id,
-        "to": target_id,
-        "type": "vote",
-        "value": value,
-        "phase": "prepare",
-        "view": current_view,
-        "round": current_round,  # 使用当前轮次标记消息
-        "qc": None,
-        "timestamp": datetime.now().isoformat(),
-        "tampered": False,
-        "isRobot": True
-    }
-    
-    session["messages"]["vote"].append(vote_message)
-    
-    # 单播给上级（不广播）——无论目标是否在线，都计入一次消息发送
+
     count_message_sent(session_id, is_broadcast=False)
     if target_sid:
         if should_deliver_message(session_id):
-            await sio.emit('message_received', vote_message, room=target_sid)
-            role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
-            print(f"[双层 HotStuff] 机器人节点 {robot_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(prepare) [View {current_view}]")
+            await sio.emit("message_received", vote_message, room=target_sid)
+            role_name = "Group Leader" if node_info["role"] == "member" else "Global Leader"
+            print(
+                f"[双层 HotStuff] 机器人节点 {robot_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(prepare) [View {session['current_view']}]"
+            )
         else:
-            print(f"[网络模拟] 机器人节点 {robot_id} 的 VOTE(prepare) 消息被丢弃 (目标: {target_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
+            print(
+                f"[网络模拟] 机器人节点 {robot_id} 的 VOTE(prepare) 消息被丢弃 (目标: {target_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)"
+            )
     else:
         print(f"[双层 HotStuff] 目标 {target_id} 不在线，缓存机器人投票")
-    
+
     await handle_vote(session_id, vote_message)
 
 async def schedule_robot_prepare(session_id: str, robot_id: int, value: int):
@@ -1998,47 +1605,30 @@ async def handle_robot_commit(session_id: str, robot_id: int, value: int):
     session = get_session(session_id)
     if not session:
         return
-    
-    current_view = session["current_view"]
-    
-    # 获取节点拓扑信息，确定投票目标
-    node_info = get_topology_info(session, robot_id, current_view)
-    target_id = node_info['parent_id']
-    
-    # 如果是 Root (Global Leader)，不需要给自己投票
-    if node_info['role'] == 'root':
+
+    # 使用 RobotAgent 生成投票（纯逻辑）
+    vote_message = robot_agent.generate_vote_for_robot(session, robot_id, "commit", value)
+    if vote_message is None:
         print(f"[双层 HotStuff] Global Leader {robot_id} 不需要给自己投票")
         return
-    
+
+    target_id = vote_message["to"]
+    node_info = get_topology_info(session, robot_id, session["current_view"])
     target_sid = node_sockets.get(session_id, {}).get(target_id)
-    
-    current_round = session.get("current_round", 1)
-    vote_message = {
-        "from": robot_id,
-        "to": target_id,
-        "type": "vote",
-        "value": value,
-        "phase": "commit",
-        "view": current_view,
-        "round": current_round,  # 使用当前轮次标记消息
-        "qc": None,
-        "timestamp": datetime.now().isoformat(),
-        "tampered": False,
-        "isRobot": True
-    }
-    
-    session["messages"]["vote"].append(vote_message)
-    
-    # 单播给上级（不广播）——无论目标是否在线，都计入一次消息发送
+
     count_message_sent(session_id, is_broadcast=False)
     if target_sid:
         if should_deliver_message(session_id):
-            await sio.emit('message_received', vote_message, room=target_sid)
-            role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
-            print(f"[双层 HotStuff] 机器人节点 {robot_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(commit)")
+            await sio.emit("message_received", vote_message, room=target_sid)
+            role_name = "Group Leader" if node_info["role"] == "member" else "Global Leader"
+            print(
+                f"[双层 HotStuff] 机器人节点 {robot_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(commit)"
+            )
         else:
-            print(f"[网络模拟] 机器人节点 {robot_id} 的 VOTE(commit) 消息被丢弃 (目标: {target_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
+            print(
+                f"[网络模拟] 机器人节点 {robot_id} 的 VOTE(commit) 消息被丢弃 (目标: {target_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)"
+            )
     else:
         print(f"[双层 HotStuff] 目标 {target_id} 不在线，缓存机器人投票")
-    
+
     await handle_vote(session_id, vote_message)

@@ -362,6 +362,7 @@ import {
 } from '@element-plus/icons-vue'
 import QRCode from 'qrcode'
 import axios from 'axios'
+import { useSessionStore } from '@/stores/sessionStore'
 import Topology from '@/components/Topology.vue'
 import HotStuffTable from '@/components/HotStuffTable.vue'
 
@@ -379,18 +380,18 @@ export default {
     HotStuffTable
   },
   setup() {
+    const store = useSessionStore()
     const formRef = ref(null)
     const qrContainer = ref(null)
     const creating = ref(false)
-    const sessionInfo = ref(null)
-    
+
     const demoDialogVisible = ref(false)
     const simulating = ref(false)
     const simulationRounds = ref([])
     const currentRound = ref(1)
     const currentSimulation = ref(null)
     const topologyRef = ref(null)
-    
+
     const formData = reactive({
       nodeCount: 20,
       faultyNodes: 1,
@@ -402,7 +403,7 @@ export default {
       allowTampering: false,
       messageDeliveryRate: 100
     })
-    
+
     const rules = {
       nodeCount: [
         { required: true, message: 'Please enter node count', trigger: 'blur' }
@@ -414,38 +415,39 @@ export default {
         { required: true, message: 'Please select topology', trigger: 'change' }
       ]
     }
-    
+
     const consensusHealth = computed(() => {
       const deliveryRate = formData.messageDeliveryRate
       const faultyRatio = formData.faultyNodes / formData.nodeCount
       return Math.round(deliveryRate * (1 - faultyRatio * 0.5))
     })
-    
-    const currentView = computed(() => sessionInfo.value?.currentView ?? 0)
-    const currentLeader = computed(() => sessionInfo.value?.leaderId ?? 0)
-    
+
+    const sessionInfo = computed(() => store.sessionInfo)
+    const currentView = computed(() => store.currentView)
+    const currentLeader = computed(() => store.leaderId)
+
     const nodeLinks = computed(() => {
-      if (!sessionInfo.value) return []
-      
+      if (!store.sessionInfo) return []
+      const config = store.sessionConfig
+      if (!config) return []
       const links = []
-      const robotNodes = sessionInfo.value.config.robotNodes || 0
-      const humanNodeCount = sessionInfo.value.config.nodeCount - robotNodes
-      
+      const robotNodes = config.robotNodes || 0
+      const humanNodeCount = config.nodeCount - robotNodes
       for (let i = 0; i < humanNodeCount; i++) {
         const nodeId = robotNodes + i
         links.push({
           nodeId: nodeId,
-          url: `${window.location.origin}/node/${sessionInfo.value.sessionId}/${nodeId}`
+          url: `${window.location.origin}/node/${store.sessionId}/${nodeId}`
         })
       }
       return links
     })
-    
+
     const createSession = async () => {
       try {
         await formRef.value.validate()
         creating.value = true
-        
+
         const response = await axios.post('/api/sessions', {
           nodeCount: formData.nodeCount,
           faultyNodes: formData.faultyNodes,
@@ -458,8 +460,8 @@ export default {
           allowTampering: formData.allowTampering,
           messageDeliveryRate: formData.messageDeliveryRate
         })
-        
-        sessionInfo.value = response.data
+
+        store.setSession(response.data)
         ElMessage.success('Session created successfully!')
       } catch (error) {
         console.error('Failed to create session:', error)
@@ -468,20 +470,17 @@ export default {
         creating.value = false
       }
     }
-    
+
     const generateQRCode = async () => {
-      if (!qrContainer.value || !sessionInfo.value) return
-      
+      if (!qrContainer.value || !store.sessionId || !store.sessionConfig) return
       try {
         qrContainer.value.innerHTML = ''
-        
         const qrData = {
-          sessionId: sessionInfo.value.sessionId,
-          nodeCount: sessionInfo.value.config.nodeCount,
-          joinUrl: `${window.location.origin}/join/${sessionInfo.value.sessionId}`,
+          sessionId: store.sessionId,
+          nodeCount: store.sessionConfig.nodeCount,
+          joinUrl: `${window.location.origin}/join/${store.sessionId}`,
           autoAssign: true
         }
-        
         try {
           await QRCode.toCanvas(qrContainer.value, JSON.stringify(qrData), {
             width: 180,
@@ -505,7 +504,7 @@ export default {
         `
       }
     }
-    
+
     const copyLink = async (url) => {
       try {
         await navigator.clipboard.writeText(url)
@@ -514,59 +513,58 @@ export default {
         ElMessage.error('Copy failed')
       }
     }
-    
+
     const resetForm = () => {
       formRef.value.resetFields()
-      sessionInfo.value = null
+      store.resetStore()
     }
-    
-    watch(sessionInfo, async (newSessionInfo) => {
-      if (newSessionInfo) {
+
+    watch(() => store.sessionId, async (newId) => {
+      if (newId) {
         await new Promise(resolve => setTimeout(resolve, 100))
         await generateQRCode()
       }
     })
-    
+
     const showDemo = async () => {
       try {
         simulating.value = true
-        
-        if (!sessionInfo.value) {
+        if (!store.sessionInfo) {
           ElMessage.error('Please create a session first!')
           return
         }
-        
         simulationRounds.value = []
-        
-        const roundsResponse = await axios.get(`/api/sessions/${sessionInfo.value.sessionId}/history`)
+        const sid = store.sessionId
+        const config = store.sessionConfig
+        const nodeCount = config?.nodeCount ?? formData.nodeCount
+
+        const roundsResponse = await axios.get(`/api/sessions/${sid}/history`)
         const rounds = roundsResponse.data.rounds || [1]
-        
+
         for (const roundNum of rounds) {
-          const response = await axios.get(`/api/sessions/${sessionInfo.value.sessionId}/history?round=${roundNum}`)
+          const response = await axios.get(`/api/sessions/${sid}/history?round=${roundNum}`)
           const roundData = response.data || {}
           const leaderId =
             typeof roundData.leaderId === 'number'
               ? roundData.leaderId
-              : ((roundNum - 1 + (roundData.nodeCount || sessionInfo.value?.config?.nodeCount || formData.nodeCount)) % (roundData.nodeCount || sessionInfo.value?.config?.nodeCount || formData.nodeCount))
+              : ((roundNum - 1 + (roundData.nodeCount || nodeCount)) % (roundData.nodeCount || nodeCount))
           simulationRounds.value.push({
             id: roundNum,
             data: { ...roundData, leaderId },
             isReal: true
           })
         }
-        
-        // 默认选中最新的一轮（最后一轮）
+
         const latestRound = rounds.length > 0 ? rounds[rounds.length - 1] : rounds[0] || 1
         currentRound.value = latestRound
         const latestRoundData = simulationRounds.value.find(r => r.id === latestRound)
         currentSimulation.value = latestRoundData ? latestRoundData.data : (simulationRounds.value[0]?.data || null)
-        
+
         demoDialogVisible.value = true
-        
         await nextTick()
         await new Promise(resolve => setTimeout(resolve, 300))
         playAnimation()
-        
+
         ElMessage.success(`Loaded ${rounds.length} consensus rounds`)
       } catch (error) {
         console.error('Failed to get session history:', error)
@@ -575,7 +573,7 @@ export default {
         simulating.value = false
       }
     }
-    
+
     const onRoundChange = (roundId) => {
       const round = simulationRounds.value.find(r => r.id === roundId)
       if (round) {
@@ -585,20 +583,20 @@ export default {
         })
       }
     }
-    
+
     const demoLeader = computed(() => {
       if (currentSimulation.value && typeof currentSimulation.value.leaderId === 'number') {
         return currentSimulation.value.leaderId
       }
       return currentLeader.value ?? 0
     })
-    
+
     const playAnimation = () => {
       if (topologyRef.value && topologyRef.value.startAnimation) {
         topologyRef.value.startAnimation()
       }
     }
-    
+
     return {
       formRef,
       qrContainer,

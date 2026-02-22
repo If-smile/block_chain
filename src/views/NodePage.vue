@@ -298,8 +298,10 @@ import {
   Refresh
 } from '@element-plus/icons-vue'
 import io from 'socket.io-client'
+import { useSessionStore } from '@/stores/sessionStore'
 
 const route = useRoute()
+const sessionStore = useSessionStore()
 const router = useRouter()
 
 // Route parameters
@@ -396,6 +398,7 @@ const connectToServer = () => {
   socket.value.on('session_config', (config) => {
     sessionConfig.value = { ...sessionConfig.value, ...config }
     acceptedValue.value = config.proposalValue
+    sessionStore.setSession({ sessionId, config, status: sessionStore.consensusStatus, createdAt: sessionStore.createdAt })
     addLog('info', `Session configuration received: ${config.nodeCount} nodes`)
   })
 
@@ -403,6 +406,7 @@ const connectToServer = () => {
     if (!connectedNodes.value.includes(data.nodeId)) {
       connectedNodes.value.push(data.nodeId)
     }
+    sessionStore.updateConnectedNodes(connectedNodes.value)
     addLog('info', `Node ${data.nodeId} joined the network`)
   })
 
@@ -411,7 +415,12 @@ const connectToServer = () => {
     if (index > -1) {
       connectedNodes.value.splice(index, 1)
     }
+    sessionStore.updateConnectedNodes(connectedNodes.value)
     addLog('warn', `Node ${data.nodeId} left the network`)
+  })
+
+  socket.value.on('connected_nodes', (nodes) => {
+    sessionStore.updateConnectedNodes(nodes)
   })
 
   socket.value.on('phase_update', (data) => {
@@ -419,13 +428,14 @@ const connectToServer = () => {
     phaseStep.value = data.step
     if (data.view !== undefined) currentView.value = data.view
     if (data.leader !== undefined) currentLeaderId.value = data.leader
-    
+    sessionStore.updatePhase(data)
+
     // 解锁等待状态：收到任何 phase_update 都表示共识已启动
     if (waitingForNextRound.value) {
       waitingForNextRound.value = false
       addLog('info', '✓ Consensus initialized, UI unlocked')
     }
-    
+
     addLog('info', `Phase updated: ${data.phase.toUpperCase()} (Step ${data.step}/4)`)
   })
 
@@ -433,6 +443,7 @@ const connectToServer = () => {
     currentView.value = data.view !== undefined ? data.view : currentView.value
     currentPhase.value = data.phase
     phaseStep.value = data.step
+    sessionStore.updatePhase({ phase: data.phase, leader: data.leader, view: data.view })
     receivedMessages.value = []
     hasChosenAction.value = false
     isNormalMode.value = false

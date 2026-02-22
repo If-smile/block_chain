@@ -14,6 +14,7 @@
     "axios": "^1.6.0",
     "echarts": "^6.0.0",
     "element-plus": "^2.4.4",
+    "pinia": "^3.0.4",
     "qrcode": "^1.5.3",
     "qrcode.vue": "^3.4.5",
     "socket.io-client": "^4.7.4",

@@ -86,6 +86,15 @@ export default {
       return safeBranchCount.value > 1 && safeNodeCount.value >= safeBranchCount.value * 2;
     });
 
+    // Byzantine nodes: IDs >= (nodeCount - byzantineNodes) are Byzantine (honest robots are 0..nodeCount-byzantineNodes-1)
+    const byzantineStart = computed(() => {
+      const n = safeNodeCount.value;
+      const byz = Number(props.byzantineNodes) || 0;
+      return Math.max(0, n - byz);
+    });
+
+    const isByzantineNode = (nodeId) => nodeId >= byzantineStart.value;
+
     // 2. 拓扑角色计算
     const getTopologyInfo = (nodeId) => {
       const n = safeNodeCount.value;
@@ -231,7 +240,7 @@ export default {
 
     const drawNodes = () => {
       const positions = nodePositions.value;
-      const byzantineStart = safeNodeCount.value - (Number(props.byzantineNodes) || 0);
+      const byzStart = byzantineStart.value;
 
       positions.forEach((pos, i) => {
         if (!pos) return;
@@ -242,10 +251,8 @@ export default {
         else if (pos.role === 'member') r = 15; 
 
         ctx.value.arc(pos.x, pos.y, r, 0, Math.PI * 2);
-        
-        let color = pos.color;
-        if (i >= byzantineStart) color = "red";
-        
+        // Byzantine nodes: distinct red/warning color; normal nodes keep role color (leader gold, group leader blue, member green)
+        let color = isByzantineNode(i) ? '#f56c6c' : pos.color;
         ctx.value.fillStyle = color;
         ctx.value.fill();
         ctx.value.strokeStyle = "#333";
@@ -281,17 +288,20 @@ export default {
            return;
        }
 
+       const byzStart = byzantineStart.value;
        const animations = [];
-       
+       const srcFromMsg = (m) => m.src !== undefined ? m.src : m.from;
+
        messages.forEach(msg => {
+           const src = srcFromMsg(msg);
            let targets = [];
            // 解析目标
            if (msg.dst === 'all') {
-               targets = positions.map((_,i)=>i).filter(i=>i!==msg.src);
+               targets = positions.map((_,i)=>i).filter(i=>i!==src);
            } else if (msg.dst === 'group_leaders') {
                positions.forEach((p,i)=>{if(p && p.role==='group_leader') targets.push(i)});
            } else if (msg.dst === 'group_members') {
-               const srcInfo = getTopologyInfo(msg.src);
+               const srcInfo = getTopologyInfo(src);
                positions.forEach((p,i)=>{
                    const tInfo = getTopologyInfo(i);
                    if(tInfo.groupId === srcInfo.groupId && tInfo.role === 'member') targets.push(i);
@@ -301,12 +311,13 @@ export default {
            }
            
            targets.forEach(dst => {
-               if(positions[msg.src] && positions[dst]) {
+               if(positions[src] && positions[dst]) {
                    animations.push({
-                       start: positions[msg.src],
+                       start: positions[src],
                        end: positions[dst],
                        progress: 0,
-                       value: msg.value
+                       value: msg.value,
+                       src
                    });
                }
            });
@@ -333,7 +344,7 @@ export default {
            drawTopology();
            
            let active = false;
-           // 2. 绘制所有运动的小球
+           // 2. 绘制消息路径线 + 运动小球（Byzantine: 红色虚线；正常: 标准色实线）
            animations.forEach(a => {
                if(a.progress < 1) {
                    a.progress += 0.02; // 速度控制
@@ -341,13 +352,33 @@ export default {
                    
                    const x = a.start.x + (a.end.x - a.start.x) * a.progress;
                    const y = a.start.y + (a.end.y - a.start.y) * a.progress;
-                   
+                   const fromByzantine = a.src >= byzStart;
+
+                   // 路径线：Byzantine 消息用红色虚线，正常消息用实线
+                   ctx.value.beginPath();
+                   ctx.value.moveTo(a.start.x, a.start.y);
+                   ctx.value.lineTo(x, y);
+                   if (fromByzantine) {
+                     ctx.value.setLineDash([6, 4]);
+                     ctx.value.strokeStyle = '#f56c6c';
+                   } else {
+                     ctx.value.setLineDash([]);
+                     const isCorrect = (a.value == props.proposalValue);
+                     ctx.value.strokeStyle = isCorrect ? '#32CD32' : '#ccc';
+                   }
+                   ctx.value.lineWidth = 2;
+                   ctx.value.stroke();
+                   ctx.value.setLineDash([]);
+
+                   // 小球：Byzantine 来源统一红色；正常按 value 匹配绿/红
                    ctx.value.beginPath();
                    ctx.value.arc(x, y, 8, 0, Math.PI * 2); // 小球半径8
-                   
-                   // 颜色判定：值匹配则绿，否则红
-                   const isCorrect = (a.value == props.proposalValue);
-                   ctx.value.fillStyle = isCorrect ? '#32CD32' : 'red';
+                   if (fromByzantine) {
+                     ctx.value.fillStyle = '#f56c6c';
+                   } else {
+                     const isCorrect = (a.value == props.proposalValue);
+                     ctx.value.fillStyle = isCorrect ? '#32CD32' : 'red';
+                   }
                    ctx.value.fill();
                    ctx.value.strokeStyle = 'white';
                    ctx.value.stroke();

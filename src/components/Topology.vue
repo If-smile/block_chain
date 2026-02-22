@@ -26,7 +26,7 @@
           </div>
           <div class="legend-item">
             <span class="legend-dot byzantine-dot"></span>
-            <span class="legend-label">Byzantine</span>
+            <span class="legend-label">Human / Pending</span>
           </div>
         </div>
       </div>
@@ -251,8 +251,8 @@ export default {
         else if (pos.role === 'member') r = 15; 
 
         ctx.value.arc(pos.x, pos.y, r, 0, Math.PI * 2);
-        // Byzantine nodes: distinct red/warning color; normal nodes keep role color (leader gold, group leader blue, member green)
-        let color = isByzantineNode(i) ? '#f56c6c' : pos.color;
+        // Potential Byzantine (human-controllable) nodes: orange/warning; normal nodes keep role color (leader gold, group leader blue, member green)
+        let color = isByzantineNode(i) ? '#e6a23c' : pos.color;
         ctx.value.fillStyle = color;
         ctx.value.fill();
         ctx.value.strokeStyle = "#333";
@@ -288,7 +288,6 @@ export default {
            return;
        }
 
-       const byzStart = byzantineStart.value;
        const animations = [];
        const srcFromMsg = (m) => m.src !== undefined ? m.src : m.from;
 
@@ -343,8 +342,9 @@ export default {
            ctx.value.clearRect(0,0,800,700);
            drawTopology();
            
+           const proposalVal = props.proposalValue;
            let active = false;
-           // 2. 绘制消息路径线 + 运动小球（Byzantine: 红色虚线；正常: 标准色实线）
+           // 2. 绘制消息路径线 + 运动小球（行为判定：仅当 value !== proposalValue 时为攻击→红虚线；否则与诚实消息一致）
            animations.forEach(a => {
                if(a.progress < 1) {
                    a.progress += 0.02; // 速度控制
@@ -352,31 +352,33 @@ export default {
                    
                    const x = a.start.x + (a.end.x - a.start.x) * a.progress;
                    const y = a.start.y + (a.end.y - a.start.y) * a.progress;
-                   const fromByzantine = a.src >= byzStart;
+                   // Attack = message has a value and it disagrees with proposal (malicious); otherwise normal (solid, standard color)
+                   const hasValue = a.value !== undefined && a.value !== null;
+                   const isAttack = hasValue && (a.value !== proposalVal);
 
-                   // 路径线：Byzantine 消息用红色虚线，正常消息用实线
+                   // 路径线：仅实际攻击为红色虚线；诚实或无 value 为实线、标准色
                    ctx.value.beginPath();
                    ctx.value.moveTo(a.start.x, a.start.y);
                    ctx.value.lineTo(x, y);
-                   if (fromByzantine) {
+                   if (isAttack) {
                      ctx.value.setLineDash([6, 4]);
                      ctx.value.strokeStyle = '#f56c6c';
                    } else {
                      ctx.value.setLineDash([]);
-                     const isCorrect = (a.value == props.proposalValue);
+                     const isCorrect = !hasValue || (a.value == proposalVal);
                      ctx.value.strokeStyle = isCorrect ? '#32CD32' : '#ccc';
                    }
                    ctx.value.lineWidth = 2;
                    ctx.value.stroke();
                    ctx.value.setLineDash([]);
 
-                   // 小球：Byzantine 来源统一红色；正常按 value 匹配绿/红
+                   // 小球：攻击消息红色；否则与诚实一致（绿/灰）
                    ctx.value.beginPath();
                    ctx.value.arc(x, y, 8, 0, Math.PI * 2); // 小球半径8
-                   if (fromByzantine) {
+                   if (isAttack) {
                      ctx.value.fillStyle = '#f56c6c';
                    } else {
-                     const isCorrect = (a.value == props.proposalValue);
+                     const isCorrect = !hasValue || (a.value == proposalVal);
                      ctx.value.fillStyle = isCorrect ? '#32CD32' : 'red';
                    }
                    ctx.value.fill();
@@ -521,8 +523,8 @@ export default {
 }
 
 .byzantine-dot {
-  background: #F44336;
-  animation: pulse-red 2s ease-in-out infinite;
+  background: #e6a23c;
+  animation: pulse-orange 2s ease-in-out infinite;
 }
 
 @keyframes pulse-gold {
@@ -534,12 +536,12 @@ export default {
   }
 }
 
-@keyframes pulse-red {
+@keyframes pulse-orange {
   0%, 100% {
-    box-shadow: 0 0 0 0 rgba(244, 67, 54, 0.7);
+    box-shadow: 0 0 0 0 rgba(230, 162, 60, 0.7);
   }
   50% {
-    box-shadow: 0 0 0 8px rgba(244, 67, 54, 0);
+    box-shadow: 0 0 0 8px rgba(230, 162, 60, 0);
   }
 }
 

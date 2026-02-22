@@ -290,9 +290,25 @@ export default {
 
        const animations = [];
        const srcFromMsg = (m) => m.src !== undefined ? m.src : m.from;
+       const simMessages = props.simulationResult?.messages || [];
+
+       const resolveValueAndFlags = (msg, src) => {
+           let realValue = msg.value;
+           let isByzFlag = !!(msg.byzantine || msg.tampered);
+           if (realValue === undefined || realValue === null) {
+               const msgType = msg.type || 'vote';
+               const found = simMessages.find(m => (m.from === src || m.src === src) && (m.type === msgType || (msg.phase && m.phase === msg.phase)));
+               if (found) {
+                   if (realValue === undefined || realValue === null) realValue = found.value;
+                   if (!isByzFlag) isByzFlag = !!(found.byzantine || found.tampered);
+               }
+           }
+           return { realValue, isByzFlag };
+       };
 
        messages.forEach(msg => {
            const src = srcFromMsg(msg);
+           const { realValue, isByzFlag } = resolveValueAndFlags(msg, src);
            let targets = [];
            // 解析目标
            if (msg.dst === 'all') {
@@ -315,7 +331,8 @@ export default {
                        start: positions[src],
                        end: positions[dst],
                        progress: 0,
-                       value: msg.value,
+                       value: realValue,
+                       isByzFlag,
                        src
                    });
                }
@@ -326,7 +343,8 @@ export default {
        console.log("[runAnimation] 动画详情:", animations.map(a => ({
          from: `${a.start.x},${a.start.y}`,
          to: `${a.end.x},${a.end.y}`,
-         value: a.value
+         value: a.value,
+         isByzFlag: a.isByzFlag
        })));
        
        if(!animations.length) { 
@@ -344,7 +362,7 @@ export default {
            
            const proposalVal = props.proposalValue;
            let active = false;
-           // 2. 绘制消息路径线 + 运动小球（行为判定：仅当 value !== proposalValue 时为攻击→红虚线；否则与诚实消息一致）
+           // 2. 绘制消息路径线 + 运动小球（行为判定：有 value 时用 != 比较；无 value 时用 isByzFlag；仅攻击→红虚线）
            animations.forEach(a => {
                if(a.progress < 1) {
                    a.progress += 0.02; // 速度控制
@@ -352,11 +370,15 @@ export default {
                    
                    const x = a.start.x + (a.end.x - a.start.x) * a.progress;
                    const y = a.start.y + (a.end.y - a.start.y) * a.progress;
-                   // Attack = message has a value and it disagrees with proposal (malicious); otherwise normal (solid, standard color)
                    const hasValue = a.value !== undefined && a.value !== null;
-                   const isAttack = hasValue && (a.value !== proposalVal);
+                   let isAttack = false;
+                   if (hasValue) {
+                     isAttack = (a.value != proposalVal); // loose equality for string/number (e.g. 0 vs "0")
+                   } else {
+                     isAttack = !!a.isByzFlag;
+                   }
 
-                   // 路径线：仅实际攻击为红色虚线；诚实或无 value 为实线、标准色
+                   // 路径线：仅实际攻击为红色虚线；诚实为实线、标准色
                    ctx.value.beginPath();
                    ctx.value.moveTo(a.start.x, a.start.y);
                    ctx.value.lineTo(x, y);

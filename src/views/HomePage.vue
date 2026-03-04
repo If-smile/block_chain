@@ -193,7 +193,7 @@
                   <div class="simulation-input">
                     <span class="simulation-label">Rounds</span>
                     <el-input-number
-                      v-model="simulationRounds"
+                      v-model="monteCarloRounds"
                       :min="100"
                       :max="50000"
                       :step="100"
@@ -420,7 +420,7 @@ export default {
 
     const demoDialogVisible = ref(false)
     const simulating = ref(false)
-    const simulationRounds = ref(1000)
+    const monteCarloRounds = ref(1000)
     const simulationLoading = ref(false)
     const simulationRounds = ref([])
     const currentRound = ref(1)
@@ -657,7 +657,7 @@ export default {
 
         const response = await axios.post('/api/simulate', {
           config,
-          rounds: simulationRounds.value
+          rounds: monteCarloRounds.value
         })
 
         const data = response.data || {}
@@ -689,7 +689,7 @@ export default {
       resetForm,
       demoDialogVisible,
       simulating,
-      simulationRounds,
+      monteCarloRounds,
       simulationLoading,
       simulationRounds,
       currentRound,

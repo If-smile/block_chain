@@ -961,7 +961,13 @@ async def handle_consensus_timeout(session_id: str, view: int):
         session_id: 会话ID
         view: 超时的视图号
     """
-    await asyncio.sleep(40)  # 等待40秒
+    # 仿真模式下缩短超时时间，加快判定网络严重丢包
+    session = get_session(session_id)
+    if not session:
+        return
+    is_simulation = session.get("config", {}).get("is_simulation", False)
+    timeout_seconds = 1.0 if is_simulation else 40.0
+    await asyncio.sleep(timeout_seconds)
     
     session = get_session(session_id)
     if not session:
@@ -1115,7 +1121,13 @@ async def trigger_view_change(session_id: str, old_view: int):
 
 async def start_next_round(session_id: str):
     """启动下一轮共识"""
-    await asyncio.sleep(10)
+    session = get_session(session_id)
+    if not session:
+        return
+    # 普通演示模式保留 10 秒间隔，仿真模式下快速进入下一轮
+    is_simulation = session.get("config", {}).get("is_simulation", False)
+    delay = 0.1 if is_simulation else 10.0
+    await asyncio.sleep(delay)
     
     session = get_session(session_id)
     if not session:

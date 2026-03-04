@@ -179,6 +179,39 @@
                 Reset
               </el-button>
             </el-form-item>
+
+            <!-- Monte Carlo Simulation Panel -->
+            <el-form-item>
+              <div class="simulation-panel">
+                <div class="simulation-header">
+                  <span class="simulation-title">🚀 Monte Carlo Simulation</span>
+                  <span class="simulation-subtitle">
+                    Run headless HotStuff/PBFT rounds on backend
+                  </span>
+                </div>
+                <div class="simulation-controls">
+                  <div class="simulation-input">
+                    <span class="simulation-label">Rounds</span>
+                    <el-input-number
+                      v-model="simulationRounds"
+                      :min="100"
+                      :max="50000"
+                      :step="100"
+                      controls-position="right"
+                      class="full-width"
+                    />
+                  </div>
+                  <el-button
+                    type="primary"
+                    :loading="simulationLoading"
+                    @click="runSimulation"
+                    class="simulation-button"
+                  >
+                    Run Simulation
+                  </el-button>
+                </div>
+              </div>
+            </el-form-item>
           </el-form>
         </el-card>
       </el-col>
@@ -387,6 +420,8 @@ export default {
 
     const demoDialogVisible = ref(false)
     const simulating = ref(false)
+    const simulationRounds = ref(1000)
+    const simulationLoading = ref(false)
     const simulationRounds = ref([])
     const currentRound = ref(1)
     const currentSimulation = ref(null)
@@ -597,6 +632,49 @@ export default {
       }
     }
 
+    const runSimulation = async () => {
+      try {
+        await formRef.value.validate()
+      } catch (e) {
+        ElMessage.error('Please fix validation errors before simulation')
+        return
+      }
+
+      simulationLoading.value = true
+      try {
+        const config = {
+          nodeCount: formData.nodeCount,
+          faultyNodes: formData.faultyNodes,
+          robotNodes: formData.nodeCount - formData.faultyNodes,
+          topology: formData.topology,
+          branchCount: formData.branchCount,
+          proposalValue: formData.proposalValue,
+          proposalContent: formData.proposalContent,
+          maliciousProposer: formData.maliciousProposer,
+          allowTampering: formData.allowTampering,
+          messageDeliveryRate: formData.messageDeliveryRate
+        }
+
+        const response = await axios.post('/api/simulate', {
+          config,
+          rounds: simulationRounds.value
+        })
+
+        const data = response.data || {}
+        const reliability = (data.reliability * 100).toFixed(2)
+        const latencyMs = (data.average_latency * 1000).toFixed(2)
+
+        ElMessage.success(
+          `Simulation finished: Reliability = ${reliability}%, Average Latency = ${latencyMs} ms (rounds=${data.rounds})`
+        )
+      } catch (error) {
+        console.error('Failed to run simulation:', error)
+        ElMessage.error('Failed to run Monte Carlo simulation')
+      } finally {
+        simulationLoading.value = false
+      }
+    }
+
     return {
       formRef,
       qrContainer,
@@ -612,13 +690,16 @@ export default {
       demoDialogVisible,
       simulating,
       simulationRounds,
+      simulationLoading,
+      simulationRounds,
       currentRound,
       currentSimulation,
       topologyRef,
       showDemo,
       onRoundChange,
       playAnimation,
-      demoLeader
+      demoLeader,
+      runSimulation
     }
   }
 }
@@ -760,6 +841,55 @@ export default {
 .action-buttons :deep(.el-form-item__content) {
   display: flex;
   flex-direction: column;
+}
+
+/* ========== Monte Carlo Simulation Panel ========== */
+.simulation-panel {
+  margin-top: 8px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  background: #f5f7fa;
+  border: 1px dashed #dcdfe6;
+}
+
+.simulation-header {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 12px;
+}
+
+.simulation-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.simulation-subtitle {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 2px;
+}
+
+.simulation-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.simulation-input {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.simulation-label {
+  font-size: 12px;
+  color: #606266;
+}
+
+.simulation-button {
+  flex-shrink: 0;
 }
 
 /* ========== 拓扑预览 ========== */

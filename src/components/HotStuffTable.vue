@@ -279,6 +279,7 @@ const comparisonAlgorithms = computed(() => {
   return [
     { key: 'double_hotstuff', ...comp.double_hotstuff },
     { key: 'hotstuff_pure', ...comp.hotstuff_pure },
+    { key: 'chained_hotstuff', ...comp.chained_hotstuff },
     { key: 'pbft_multi_layer', ...comp.pbft_multi_layer },
     { key: 'pbft_pure', ...comp.pbft_pure }
   ]
@@ -296,7 +297,7 @@ const chartOption = computed(() => {
   const actualData = algorithms.map((a, index) => ({
     value: a.actual ?? 0,
     itemStyle: {
-      color: getBarColor(index, a.is_current),
+      color: getBarColor(index, a.is_current, a.key),
       borderRadius: [0, 4, 4, 0]
     }
   }))
@@ -427,7 +428,7 @@ const chartOption = computed(() => {
 })
 
 // 获取柱状图颜色
-const getBarColor = (index, isCurrent) => {
+const getBarColor = (index, isCurrent, key) => {
   if (isCurrent) {
     return {
       type: 'linear',
@@ -441,7 +442,22 @@ const getBarColor = (index, isCurrent) => {
       ]
     }
   }
-  
+
+  // 为 Chained HotStuff 单独提供一组醒目的配色（紫色渐变）
+  if (key === 'chained_hotstuff') {
+    return {
+      type: 'linear',
+      x: 0,
+      y: 0,
+      x2: 1,
+      y2: 0,
+      colorStops: [
+        { offset: 0, color: '#9c27b0' },
+        { offset: 1, color: '#ce93d8' }
+      ]
+    }
+  }
+
   const colors = [
     { start: '#2196F3', end: '#42A5F5' },  // hotstuff_pure
     { start: '#FF9800', end: '#FFB74D' },  // pbft_multi_layer

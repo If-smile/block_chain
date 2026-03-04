@@ -1,6 +1,6 @@
 """
 FastAPI 应用入口点
-
+ 
 此文件作为应用的入口点，负责：
 - 初始化 FastAPI 应用
 - 配置 CORS
@@ -11,8 +11,11 @@ FastAPI 应用入口点
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
+from typing import Optional, Dict, Any
+from pydantic import BaseModel
 import socketio
+import asyncio
+import time
 
 # 导入全局状态和 Socket.IO 服务器
 from state import sio, sessions, connected_nodes, node_sockets, get_session
@@ -83,7 +86,14 @@ async def on_startup():
     print("[startup] 会话状态已从 SQLite 恢复到内存")
 
 
-# ==================== HTTP 路由 ====================
+# ==================== HTTP 路由 & 请求模型 ====================
+
+
+class SimulationRequest(BaseModel):
+    """Monte Carlo 仿真请求体"""
+    config: Dict[str, Any]
+    rounds: int = 1000
+
 
 @app.post("/api/sessions")
 async def create_consensus_session(config: SessionConfig):
@@ -93,6 +103,99 @@ async def create_consensus_session(config: SessionConfig):
         return session_info
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/simulate")
+async def run_simulation(request: SimulationRequest):
+    """
+    Monte Carlo 极速仿真接口
+    
+    根据给定配置与轮次，在无头模式下连续运行多轮共识并返回统计结果。
+    """
+    config_data = dict(request.config or {})
+
+    # 基本参数校验
+    if "nodeCount" not in config_data:
+        raise HTTPException(status_code=400, detail="config.nodeCount is required")
+    node_count = config_data["nodeCount"]
+    faulty_nodes = config_data.get("faultyNodes", 0)
+
+    # 如果未显式提供机器人节点数量，则按默认规则推导
+    if "robotNodes" not in config_data:
+        config_data["robotNodes"] = max(node_count - faulty_nodes, 0)
+
+    # 仿真模式强制关闭恶意提议者
+    config_data["maliciousProposer"] = False
+
+    # 轮次数校验
+    rounds = request.rounds or 1000
+    if rounds <= 0:
+        raise HTTPException(status_code=400, detail="rounds must be positive")
+
+    # 将 dict 转为 SessionConfig 以复用现有创建逻辑
+    try:
+        session_config = SessionConfig(**config_data)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid config: {e}")
+
+    success_count = 0
+    total_latency = 0.0
+
+    for _ in range(rounds):
+        # 1. 创建全新 session
+        session_info = create_session(session_config)
+        session_id = session_info["sessionId"]
+
+        # 2. 在会话配置中注入仿真标志 & 关闭恶意 Leader
+        session = get_session(session_id)
+        if not session:
+            continue
+        session.setdefault("config", {})
+        session["config"]["is_simulation"] = True
+        session["config"]["maliciousProposer"] = False
+
+        # 3. 记录起始视图与起始时间
+        start_time = time.perf_counter()
+        initial_view = session.get("current_view", 0)
+
+        # 4. 轮询等待结果或视图变更 / 超时
+        decided = False
+        while True:
+            now = time.perf_counter()
+            elapsed = now - start_time
+            if elapsed > 2.0:
+                # 超过 2 秒仍未达成共识，视为本轮失败
+                break
+
+            session = get_session(session_id)
+            if not session:
+                break
+
+            consensus = session.get("consensus_result")
+            if consensus:
+                success_count += 1
+                total_latency += elapsed
+                decided = True
+                break
+
+            current_view = session.get("current_view", initial_view)
+            if current_view != initial_view and not consensus:
+                # 发生 View Change 且尚未达成共识，视为本轮放弃
+                break
+
+            await asyncio.sleep(0.05)
+
+        # 这里不主动删除 session，保留历史数据便于科研分析
+
+    reliability = success_count / rounds if rounds > 0 else 0.0
+    average_latency = (total_latency / success_count) if success_count > 0 else 0.0
+
+    return {
+        "reliability": reliability,
+        "average_latency": average_latency,
+        "rounds": rounds,
+        "success_count": success_count,
+    }
 
 @app.get("/api/sessions/{session_id}")
 async def get_session_info(session_id: str):

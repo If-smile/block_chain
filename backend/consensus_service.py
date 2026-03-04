@@ -551,6 +551,8 @@ class ConsensusService:
         theoretical_pbft = 2 * n * n
         theoretical_hotstuff = 4 * n
         theoretical_multilayer = 2 * k * k + 2 * n * n // k
+        # Chained HotStuff（单层稳态，每确认一个区块的消息数）：2N
+        theoretical_chained_hotstuff = 2 * n
 
         hotstuff_double_actual = actual_messages
         # 比例计算时除数至少为 1，避免除零或无穷大
@@ -580,6 +582,13 @@ class ConsensusService:
                 "actual": shadow_hotstuff_actual,
                 "complexity": "O(N)",
                 "optimization_ratio": optimization_vs_hotstuff_pure,
+            },
+            "chained_hotstuff": {
+                "name": "Chained HotStuff",
+                "theoretical": theoretical_chained_hotstuff,
+                # 这里仅做理论 Shadow 演示，实际计数未单独统计
+                "actual": theoretical_chained_hotstuff,
+                "complexity": "O(N)",
             },
             "pbft_multi_layer": {
                 "name": "PBFT (Multi-Layer)",

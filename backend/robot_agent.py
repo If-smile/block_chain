@@ -207,10 +207,13 @@ async def create_robot_nodes_and_start(
     start_pbft_process_cb: Callable[[str], Awaitable[None]],
 ) -> None:
     """创建机器人节点并立即启动 HotStuff 流程。start_pbft_process_cb 由 socket_handlers 注入。"""
-    await asyncio.sleep(1)
     session = get_session(session_id)
     if not session:
         return
+    # 仿真模式下大幅缩短等待时间以提升吞吐
+    is_simulation = session.get("config", {}).get("is_simulation", False)
+    delay = 0.001 if is_simulation else 1.0
+    await asyncio.sleep(delay)
     print(f"创建{robot_count}个机器人节点")
     for robot_id in range(robot_count):
         session["robot_nodes"].append(robot_id)
@@ -240,10 +243,12 @@ async def trigger_robot_votes(
 ) -> None:
     """进入新阶段时触发机器人节点发送投票。handle_vote、finalize_consensus 由 socket_handlers 注入。"""
     print(f"触发机器人自动投票: session={session_id}, view={view}, phase={phase}")
-    await asyncio.sleep(2.0)
     session = get_session(session_id)
     if not session:
         return
+    is_simulation = session.get("config", {}).get("is_simulation", False)
+    delay = 0.001 if is_simulation else 2.0
+    await asyncio.sleep(delay)
     if session.get("current_view") != view:
         print(f"视图已从 {view} 切换为 {session.get('current_view')}，取消本次自动投票")
         return
@@ -331,7 +336,9 @@ async def robot_send_pre_prepare(
         f"value={message['value']}, highQC.view={message['qc'].get('view') if message.get('qc') else None}"
     )
     print(f"[双层 HotStuff] Proposal 通过分层广播：Global Leader -> {len(group_leaders)} Group Leaders -> Members")
-    await asyncio.sleep(1)
+    is_simulation = session.get("config", {}).get("is_simulation", False)
+    delay = 0.001 if is_simulation else 1.0
+    await asyncio.sleep(delay)
     session["phase"] = "prepare"
     session["phase_step"] = 1
     await sio.emit(
@@ -373,7 +380,9 @@ async def robot_send_prepare_messages(
         return
     proposal_msg = proposal_msgs[-1]
     print(f"View {current_view}: 机器人节点将在10秒后发送 VOTE(prepare) 给 Leader")
-    await asyncio.sleep(10)
+    is_simulation = session.get("config", {}).get("is_simulation", False)
+    delay = 0.001 if is_simulation else 10.0
+    await asyncio.sleep(delay)
     session = get_session(session_id)
     if not session:
         return
@@ -433,7 +442,9 @@ async def schedule_robot_prepare(
     if not session:
         return
     current_view = session["current_view"]
-    await asyncio.sleep(2.0)
+    is_simulation = session.get("config", {}).get("is_simulation", False)
+    delay = 0.001 if is_simulation else 2.0
+    await asyncio.sleep(delay)
     session = get_session(session_id)
     if not session:
         return
@@ -463,7 +474,9 @@ async def schedule_robot_commit(
     if not session:
         return
     current_round = session["current_round"]
-    await asyncio.sleep(10)
+    is_simulation = session.get("config", {}).get("is_simulation", False)
+    delay = 0.001 if is_simulation else 10.0
+    await asyncio.sleep(delay)
     session = get_session(session_id)
     if not session:
         return

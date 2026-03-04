@@ -98,3 +98,7 @@ pids/
 
 # TernJS port file
 .tern-port
+
+# SQLite databases
+*.db
+*.db-journal

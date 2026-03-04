@@ -136,7 +136,7 @@ def create_session(config: SessionConfig, is_simulation: bool = False) -> Sessio
     node_sockets[session_id] = {}
 
     # 将初始会话状态持久化到 SQLite（仿真模式下跳过以避免磁盘 I/O）
-    if not session.get("config", {}).get("is_simulation"):
+    if not is_simulation:
         try:
             database.upsert_session(session_id, session)
         except Exception as e:
@@ -941,19 +941,22 @@ async def finalize_consensus(session_id: str, status: str = "Consensus Completed
 
     print(f"会话 {session_id} View {session['current_view']} 共识完成: {status}")
 
-    # 持久化最新历史记录和会话状态（仿真模式下跳过以避免磁盘 I/O）
-    if not session.get("config", {}).get("is_simulation"):
+    is_simulation = session.get("config", {}).get("is_simulation", False)
+    
+    if not is_simulation:
+        # 只有正常演示模式才写入数据库
         try:
             database.append_history(session_id, history_item)
             database.upsert_session(session_id, session)
         except Exception as e:
-            print(f"[database] 保存共识历史/会话状态失败: session_id={session_id}, error={e}")
-
-    print(f"View {session['current_view']} 共识完成，会话状态设为 completed")
-
-    # 自动多轮演示：10 秒后开始下一轮
-    print(f"当前轮次共识完成，10秒后自动开始下一轮...")
-    asyncio.create_task(start_next_round(session_id))
+            print(f"[database] 保存失败: {e}")
+        
+        # 只有正常演示模式才自动开启下一轮
+        print(f"当前轮次共识完成，10秒后自动开始下一轮...")
+        asyncio.create_task(start_next_round(session_id))
+    else:
+        # 仿真模式下，打断链条，绝不触发下一轮和数据库写入
+        print(f"[Simulation] 本轮仿真完成，销毁幽灵任务。")
 
 async def handle_consensus_timeout(session_id: str, view: int):
     """
@@ -1131,10 +1134,10 @@ async def start_next_round(session_id: str):
     session = get_session(session_id)
     if not session:
         return
-    # 普通演示模式保留 10 秒间隔，仿真模式下快速进入下一轮
-    is_simulation = session.get("config", {}).get("is_simulation", False)
-    delay = 0.1 if is_simulation else 10.0
-    await asyncio.sleep(delay)
+    if session.get("config", {}).get("is_simulation", False):
+        return  # 终极防御：如果是仿真模式，绝对不允许执行下一轮逻辑！
+    # 普通演示模式保留 10 秒间隔
+    await asyncio.sleep(10.0)
     
     session = get_session(session_id)
     if not session:

@@ -143,15 +143,14 @@ async def run_simulation(request: SimulationRequest):
 
     for _ in range(rounds):
         # 1. 创建全新 session
-        session_info = create_session(session_config)
+        session_info = create_session(session_config, is_simulation=True)
         session_id = session_info["sessionId"]
 
-        # 2. 在会话配置中注入仿真标志 & 关闭恶意 Leader
+        # 2. 在会话配置中关闭恶意 Leader（仿真模式下已在创建时注入 is_simulation）
         session = get_session(session_id)
         if not session:
             continue
         session.setdefault("config", {})
-        session["config"]["is_simulation"] = True
         session["config"]["maliciousProposer"] = False
 
         # 3. 记录起始视图与起始时间
@@ -163,8 +162,8 @@ async def run_simulation(request: SimulationRequest):
         while True:
             now = time.perf_counter()
             elapsed = now - start_time
-            if elapsed > 2.0:
-                # 超过 2 秒仍未达成共识，视为本轮失败
+            if elapsed > 0.1:
+                # 超过 0.1 秒仍未达成共识，视为本轮失败
                 break
 
             session = get_session(session_id)
@@ -185,7 +184,13 @@ async def run_simulation(request: SimulationRequest):
 
             await asyncio.sleep(0.05)
 
-        # 这里不主动删除 session，保留历史数据便于科研分析
+        # 本轮结束后立即清理内存中的 session，防止大量无头会话堆积
+        if session_id in sessions:
+            del sessions[session_id]
+        if session_id in connected_nodes:
+            del connected_nodes[session_id]
+        if session_id in node_sockets:
+            del node_sockets[session_id]
 
     reliability = success_count / rounds if rounds > 0 else 0.0
     average_latency = (total_latency / success_count) if success_count > 0 else 0.0

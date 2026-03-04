@@ -69,7 +69,7 @@ robot_agent = RobotAgent()
 
 # ==================== 会话管理 ====================
 
-def create_session(config: SessionConfig) -> SessionInfo:
+def create_session(config: SessionConfig, is_simulation: bool = False) -> SessionInfo:
     """创建新的共识会话"""
     session_id = str(uuid.uuid4())
     
@@ -80,8 +80,13 @@ def create_session(config: SessionConfig) -> SessionInfo:
         'proposalValue': config.proposalValue
     })
     
+    base_config = config.dict()
+    # 仿真模式下直接在配置中打上标记，后续逻辑可据此关闭持久化、缩短超时等
+    if is_simulation:
+        base_config["is_simulation"] = True
+
     session = {
-        "config": config.dict(),
+        "config": base_config,
         "status": "waiting",
         "phase": "waiting",
         "phase_step": 0,
@@ -130,11 +135,12 @@ def create_session(config: SessionConfig) -> SessionInfo:
     connected_nodes[session_id] = []
     node_sockets[session_id] = {}
 
-    # 将初始会话状态持久化到 SQLite
-    try:
-        database.upsert_session(session_id, session)
-    except Exception as e:
-        print(f"[database] 保存初始会话 {session_id} 失败: {e}")
+    # 将初始会话状态持久化到 SQLite（仿真模式下跳过以避免磁盘 I/O）
+    if not session.get("config", {}).get("is_simulation"):
+        try:
+            database.upsert_session(session_id, session)
+        except Exception as e:
+            print(f"[database] 保存初始会话 {session_id} 失败: {e}")
     
     # 创建机器人节点并立即开始共识（start_pbft_process 由本模块定义，注入为回调）
     asyncio.create_task(
@@ -935,12 +941,13 @@ async def finalize_consensus(session_id: str, status: str = "Consensus Completed
 
     print(f"会话 {session_id} View {session['current_view']} 共识完成: {status}")
 
-    # 持久化最新历史记录和会话状态
-    try:
-        database.append_history(session_id, history_item)
-        database.upsert_session(session_id, session)
-    except Exception as e:
-        print(f"[database] 保存共识历史/会话状态失败: session_id={session_id}, error={e}")
+    # 持久化最新历史记录和会话状态（仿真模式下跳过以避免磁盘 I/O）
+    if not session.get("config", {}).get("is_simulation"):
+        try:
+            database.append_history(session_id, history_item)
+            database.upsert_session(session_id, session)
+        except Exception as e:
+            print(f"[database] 保存共识历史/会话状态失败: session_id={session_id}, error={e}")
 
     print(f"View {session['current_view']} 共识完成，会话状态设为 completed")
 
@@ -966,7 +973,7 @@ async def handle_consensus_timeout(session_id: str, view: int):
     if not session:
         return
     is_simulation = session.get("config", {}).get("is_simulation", False)
-    timeout_seconds = 1.0 if is_simulation else 40.0
+    timeout_seconds = 0.05 if is_simulation else 40.0
     await asyncio.sleep(timeout_seconds)
     
     session = get_session(session_id)
@@ -1187,11 +1194,12 @@ async def start_next_round(session_id: str):
     
     print(f"第{current_round}轮开始，所有节点（包括新加入的人类节点）现在可以参与共识")
 
-    # 持久化新一轮开始时的会话状态
-    try:
-        database.upsert_session(session_id, session)
-    except Exception as e:
-        print(f"[database] 保存新一轮会话状态失败: session_id={session_id}, error={e}")
+    # 持久化新一轮开始时的会话状态（仿真模式下跳过）
+    if not session.get("config", {}).get("is_simulation"):
+        try:
+            database.upsert_session(session_id, session)
+        except Exception as e:
+            print(f"[database] 保存新一轮会话状态失败: session_id={session_id}, error={e}")
     
     # 机器人提议者发送预准备消息（注意：HotStuff 中应该通过 View Change 继续，而不是"下一轮"）
     async def _prep_cb(s, r, v):

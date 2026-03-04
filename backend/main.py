@@ -174,8 +174,8 @@ async def run_simulation(request: SimulationRequest):
         while True:
             now = time.perf_counter()
             elapsed = now - start_time
-            if elapsed > 0.1:
-                # 超过 0.1 秒仍未达成共识，视为本轮失败
+            if elapsed > 0.5:
+                # 超过 0.5 秒仍未达成共识，视为本轮失败
                 break
 
             session = get_session(session_id)
@@ -194,7 +194,7 @@ async def run_simulation(request: SimulationRequest):
                 # 发生 View Change 且尚未达成共识，视为本轮放弃
                 break
 
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.01)
 
         # 本轮结束后立即清理内存中的 session，防止大量无头会话堆积
         if session_id in sessions:

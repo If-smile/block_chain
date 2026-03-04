@@ -976,7 +976,7 @@ async def handle_consensus_timeout(session_id: str, view: int):
     if not session:
         return
     is_simulation = session.get("config", {}).get("is_simulation", False)
-    timeout_seconds = 0.05 if is_simulation else 40.0
+    timeout_seconds = 0.2 if is_simulation else 40.0
     await asyncio.sleep(timeout_seconds)
     
     session = get_session(session_id)

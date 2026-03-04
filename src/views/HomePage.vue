@@ -210,6 +210,34 @@
                     Run Simulation
                   </el-button>
                 </div>
+
+                <div v-if="showSimulationProgress" style="margin-top: 15px;">
+                  <el-progress
+                    :percentage="simulationProgress"
+                    :text-inside="true"
+                    :stroke-width="20"
+                    status="success"
+                  />
+                </div>
+
+                <el-card
+                  v-if="simulationResult"
+                  style="margin-top: 15px; border-radius: 8px;"
+                  shadow="hover"
+                >
+                  <template #header>
+                    <div style="display: flex; align-items: center; justify-content: space-between;">
+                      <span style="font-weight: bold; font-size: 16px;">📊 Simulation Results</span>
+                      <el-tag type="success" effect="dark">{{ simulationResult.reliability }}% Reliability</el-tag>
+                    </div>
+                  </template>
+                  <el-descriptions :column="1" border size="small">
+                    <el-descriptions-item label="Total Rounds">{{ simulationResult.rounds }}</el-descriptions-item>
+                    <el-descriptions-item label="Successful Rounds">{{ simulationResult.successCount }}</el-descriptions-item>
+                    <el-descriptions-item label="Average Latency">{{ simulationResult.latency }} ms</el-descriptions-item>
+                    <el-descriptions-item label="Delivery Rate">{{ formData.messageDeliveryRate }}%</el-descriptions-item>
+                  </el-descriptions>
+                </el-card>
               </div>
             </el-form-item>
           </el-form>
@@ -382,7 +410,7 @@
 </template>
 
 <script>
-import { ref, reactive, computed, watch, nextTick } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { 
   VideoPlay, 
@@ -395,6 +423,7 @@ import {
 } from '@element-plus/icons-vue'
 import QRCode from 'qrcode'
 import axios from 'axios'
+import io from 'socket.io-client'
 import { useSessionStore } from '@/stores/sessionStore'
 import Topology from '@/components/Topology.vue'
 import HotStuffTable from '@/components/HotStuffTable.vue'
@@ -423,6 +452,10 @@ export default {
     const monteCarloRounds = ref(1000)
     const simulationLoading = ref(false)
     const simulationRounds = ref([])
+    const simulationProgress = ref(0)
+    const showSimulationProgress = ref(false)
+    const simulationResult = ref(null)
+    const simulationSocket = ref(null)
     const currentRound = ref(1)
     const currentSimulation = ref(null)
     const topologyRef = ref(null)
@@ -561,6 +594,22 @@ export default {
       }
     })
 
+    onMounted(() => {
+      simulationSocket.value = io(window.location.origin)
+      simulationSocket.value.on('simulation_progress', (data) => {
+        if (data && typeof data.progress === 'number') {
+          simulationProgress.value = data.progress
+        }
+      })
+    })
+
+    onBeforeUnmount(() => {
+      if (simulationSocket.value) {
+        simulationSocket.value.disconnect()
+        simulationSocket.value = null
+      }
+    })
+
     const showDemo = async () => {
       try {
         simulating.value = true
@@ -640,6 +689,11 @@ export default {
         return
       }
 
+      // 重置进度与结果
+      simulationResult.value = null
+      simulationProgress.value = 0
+      showSimulationProgress.value = true
+
       simulationLoading.value = true
       try {
         const config = {
@@ -661,12 +715,14 @@ export default {
         })
 
         const data = response.data || {}
-        const reliability = (data.reliability * 100).toFixed(2)
-        const latencyMs = (data.average_latency * 1000).toFixed(2)
-
-        ElMessage.success(
-          `Simulation finished: Reliability = ${reliability}%, Average Latency = ${latencyMs} ms (rounds=${data.rounds})`
-        )
+        showSimulationProgress.value = false
+        simulationProgress.value = 100
+        simulationResult.value = {
+          reliability: (data.reliability * 100).toFixed(2),
+          latency: (data.average_latency * 1000).toFixed(2),
+          rounds: data.rounds,
+          successCount: data.success_count
+        }
       } catch (error) {
         console.error('Failed to run simulation:', error)
         ElMessage.error('Failed to run Monte Carlo simulation')
@@ -692,6 +748,9 @@ export default {
       monteCarloRounds,
       simulationLoading,
       simulationRounds,
+      simulationProgress,
+      showSimulationProgress,
+      simulationResult,
       currentRound,
       currentSimulation,
       topologyRef,

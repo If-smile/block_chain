@@ -141,7 +141,19 @@ async def run_simulation(request: SimulationRequest):
     success_count = 0
     total_latency = 0.0
 
-    for _ in range(rounds):
+    # 每完成 5% 的进度向前端广播一次进度（约 20 次更新）
+    update_interval = max(1, rounds // 20)
+
+    for i in range(rounds):
+        # 进度广播（全局，不区分前端页面）
+        if i % update_interval == 0 or i == rounds - 1:
+            progress_pct = int((i / rounds) * 100)
+            try:
+                await sio.emit("simulation_progress", {"progress": progress_pct})
+            except Exception:
+                # 忽略连接错误，避免影响极速仿真
+                pass
+
         # 1. 创建全新 session
         session_info = create_session(session_config, is_simulation=True)
         session_id = session_info["sessionId"]

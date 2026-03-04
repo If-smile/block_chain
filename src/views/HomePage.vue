@@ -146,7 +146,7 @@
             <el-form-item label="Delivery Rate">
               <el-slider 
                 v-model="formData.messageDeliveryRate" 
-                :min="50" 
+                :min="0" 
                 :max="100" 
                 :step="5"
                 show-input

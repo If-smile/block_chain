@@ -258,20 +258,25 @@ async def trigger_robot_votes(
         return
     votes = robot_agent.generate_votes_for_phase(session, view, phase, value)
     for vote_msg in votes:
+        # 1. 模拟 Leader 广播 QC 到 Replica 的前向丢包 (Forward Drop)
+        if not should_deliver_message(session_id):
+            continue
+            
         target_id = vote_msg["to"]
         node_info = get_topology_info(session, vote_msg["from"], view)
         target_sid = node_sockets.get(session_id, {}).get(target_id)
         count_message_sent(session_id, is_broadcast=False)
-        if target_sid:
-            if should_deliver_message(session_id):
-                await sio.emit("message_received", vote_msg, room=target_sid)
-                role_name = "Group Leader" if node_info["role"] == "member" else "Global Leader"
-                print(f"[双层 HotStuff] 机器人节点 {vote_msg['from']} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE({phase})")
-            else:
-                print(
-                    f"[网络模拟] 机器人节点 {vote_msg['from']} 的 VOTE({phase}) 消息被丢弃 (目标: {target_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)"
-                )
-        await handle_vote_cb(session_id, vote_msg)
+        
+        # 2. 模拟 Replica 发回 Vote 的反向丢包 (Reverse Drop)
+        delivered = should_deliver_message(session_id)
+        
+        if target_sid and delivered:
+            await sio.emit("message_received", vote_msg, room=target_sid)
+            role_name = "Group Leader" if node_info["role"] == "member" else "Global Leader"
+            print(f"[双层 HotStuff] 机器人节点 {vote_msg['from']} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE({phase})")
+            
+        if delivered:
+            await handle_vote_cb(session_id, vote_msg)
 
 
 async def robot_send_pre_prepare(
@@ -395,6 +400,9 @@ async def robot_send_prepare_messages(
             continue
         if session["robot_node_states"][robot_id].get("sent_prepare"):
             continue
+        if not should_deliver_message(session_id):
+            print(f"[网络模拟] 节点 {robot_id} 未收到 Proposal(丢包)，不发选票")
+            continue
         await handle_proposal_message_cb(session_id, proposal_msg, robot_id)
         session["robot_node_states"][robot_id]["sent_prepare"] = True
 
@@ -418,16 +426,20 @@ async def handle_robot_prepare(
     node_info = get_topology_info(session, robot_id, session["current_view"])
     target_sid = node_sockets.get(session_id, {}).get(target_id)
     count_message_sent(session_id, is_broadcast=False)
-    if target_sid:
-        if should_deliver_message(session_id):
+    delivered = should_deliver_message(session_id)
+    if delivered:
+        if target_sid:
             await sio.emit("message_received", vote_message, room=target_sid)
             role_name = "Group Leader" if node_info["role"] == "member" else "Global Leader"
             print(f"[双层 HotStuff] 机器人节点 {robot_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(prepare) [View {session['current_view']}]")
         else:
-            print(f"[网络模拟] 机器人节点 {robot_id} 的 VOTE(prepare) 消息被丢弃 (目标: {target_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
+            print(f"[双层 HotStuff] 目标 {target_id} 不在线，缓存机器人投票")
+        await handle_vote_cb(session_id, vote_message)
     else:
-        print(f"[双层 HotStuff] 目标 {target_id} 不在线，缓存机器人投票")
-    await handle_vote_cb(session_id, vote_message)
+        print(
+            f"[网络模拟] 后端拦截: 机器人 VOTE(prepare) 丢包 "
+            f"(from={robot_id}, to={target_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)"
+        )
 
 
 async def schedule_robot_prepare(
@@ -505,14 +517,18 @@ async def handle_robot_commit(
     node_info = get_topology_info(session, robot_id, session["current_view"])
     target_sid = node_sockets.get(session_id, {}).get(target_id)
     count_message_sent(session_id, is_broadcast=False)
-    if target_sid:
-        if should_deliver_message(session_id):
+    delivered = should_deliver_message(session_id)
+    if delivered:
+        if target_sid:
             await sio.emit("message_received", vote_message, room=target_sid)
             role_name = "Group Leader" if node_info["role"] == "member" else "Global Leader"
             print(f"[双层 HotStuff] 机器人节点 {robot_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(commit)")
         else:
-            print(f"[网络模拟] 机器人节点 {robot_id} 的 VOTE(commit) 消息被丢弃 (目标: {target_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
+            print(f"[双层 HotStuff] 目标 {target_id} 不在线，缓存机器人投票")
+        await handle_vote_cb(session_id, vote_message)
     else:
-        print(f"[双层 HotStuff] 目标 {target_id} 不在线，缓存机器人投票")
-    await handle_vote_cb(session_id, vote_message)
+        print(
+            f"[网络模拟] 后端拦截: 机器人 VOTE(commit) 丢包 "
+            f"(from={robot_id}, to={target_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)"
+        )
 

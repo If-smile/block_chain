@@ -174,8 +174,8 @@ async def run_simulation(request: SimulationRequest):
         while True:
             now = time.perf_counter()
             elapsed = now - start_time
-            if elapsed > 0.5:
-                # 超过 0.5 秒仍未达成共识，视为本轮失败
+            if elapsed > 1.0:
+                # 超过 1.0 秒仍未达成共识，视为本轮失败
                 break
 
             session = get_session(session_id)

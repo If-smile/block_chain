@@ -304,8 +304,9 @@ async def send_prepare(sid, data):
     
     # 单播给上级（不广播）——无论目标是否在线，都计入一次消息发送
     count_message_sent(session_id, is_broadcast=False)
+    delivered = should_deliver_message(session_id)
     if target_sid:
-        if should_deliver_message(session_id):
+        if delivered:
             await sio.emit('message_received', vote_message, room=target_sid)
             role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
             print(f"[双层 HotStuff] 节点 {node_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(prepare)")
@@ -314,8 +315,9 @@ async def send_prepare(sid, data):
     else:
         print(f"[双层 HotStuff] 目标 {target_id} 不在线，缓存 VOTE")
     
-    # 直接在后端处理投票累积
-    await handle_vote(session_id, vote_message)
+    # 只有在消息被视为成功送达时，才在后端处理投票累积
+    if delivered:
+        await handle_vote(session_id, vote_message)
 
 @sio.event
 async def send_commit(sid, data):
@@ -361,8 +363,9 @@ async def send_commit(sid, data):
     
     # 单播给上级（不广播）——无论目标是否在线，都计入一次消息发送
     count_message_sent(session_id, is_broadcast=False)
+    delivered = should_deliver_message(session_id)
     if target_sid:
-        if should_deliver_message(session_id):
+        if delivered:
             await sio.emit('message_received', vote_message, room=target_sid)
             role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
             print(f"[双层 HotStuff] 节点 {node_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(commit)")
@@ -371,8 +374,9 @@ async def send_commit(sid, data):
     else:
         print(f"[双层 HotStuff] 目标 {target_id} 不在线，缓存 VOTE")
     
-    # 直接在后端处理投票累积
-    await handle_vote(session_id, vote_message)
+    # 只有在消息被视为成功送达时，才在后端处理投票累积
+    if delivered:
+        await handle_vote(session_id, vote_message)
 
 @sio.event
 async def send_message(sid, data):
@@ -976,7 +980,7 @@ async def handle_consensus_timeout(session_id: str, view: int):
     if not session:
         return
     is_simulation = session.get("config", {}).get("is_simulation", False)
-    timeout_seconds = 0.2 if is_simulation else 40.0
+    timeout_seconds = 0.5 if is_simulation else 40.0
     await asyncio.sleep(timeout_seconds)
     
     session = get_session(session_id)

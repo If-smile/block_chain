@@ -376,22 +376,23 @@ class ConsensusService:
 
         # 计算分层广播的目标（纯 ID 计算，不涉及网络）
         n = session["config"]["nodeCount"]
-        branch_count = session["config"].get("branchCount", 2)
-        group_size = max(1, n // branch_count)
 
+        # 1) 找出所有组长（不包括 root）
         group_leaders: List[int] = []
-        for gid in range(branch_count):
-            group_start_id = gid * group_size
-            if group_start_id < n and group_start_id != global_leader_id:
-                group_leaders.append(group_start_id)
+        for node_id in range(n):
+            info = get_topology_info(session, node_id, view)
+            if info["role"] == "group_leader":
+                group_leaders.append(node_id)
 
+        # 2) 为每个组长收集组内成员（parent_id == 该组长）
         members_by_group_leader: Dict[int, List[int]] = {}
         for gl_id in group_leaders:
-            gl_info = get_topology_info(session, gl_id, view)
-            group_id = gl_info["group_id"]
-            group_start_id = group_id * group_size
-            group_end_id = min((group_id + 1) * group_size, n)
-            members_by_group_leader[gl_id] = list(range(group_start_id + 1, group_end_id))
+            members_by_group_leader[gl_id] = []
+        for node_id in range(n):
+            info = get_topology_info(session, node_id, view)
+            parent_id = info.get("parent_id")
+            if parent_id in members_by_group_leader and info["role"] == "member":
+                members_by_group_leader[parent_id].append(node_id)
 
         routing = {
             "global_leader": global_leader_id,

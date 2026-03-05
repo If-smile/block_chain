@@ -301,13 +301,13 @@ async def robot_send_pre_prepare(
     proposer_id = message["from"]
     config = session["config"]
     n = config["nodeCount"]
-    branch_count = config.get("branchCount", 2)
-    group_size = max(1, n // branch_count)
-    group_leaders = []
-    for gid in range(branch_count):
-        group_start_id = gid * group_size
-        if group_start_id < n and group_start_id != proposer_id:
-            group_leaders.append(group_start_id)
+
+    # 根据通用拓扑引擎确定所有组长（不包括 Global Leader 自己）
+    group_leaders: List[int] = []
+    for node_id in range(n):
+        info = get_topology_info(session, node_id, current_view)
+        if info["role"] == "group_leader" and node_id != proposer_id:
+            group_leaders.append(node_id)
     if group_leaders:
         count_message_sent(session_id, is_broadcast=False, target_count=len(group_leaders))
     for gl_id in group_leaders:
@@ -318,21 +318,27 @@ async def robot_send_pre_prepare(
             else:
                 print(f"[网络模拟] Proposal 消息被丢弃 (目标: Group Leader {gl_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
     for gl_id in group_leaders:
-        gl_info = get_topology_info(session, gl_id, current_view)
-        group_id = gl_info["group_id"]
-        group_start_id = group_id * group_size
-        group_end_id = min((group_id + 1) * group_size, n)
         forward_message = message.copy()
         forward_message["from"] = gl_id
         forward_message["to"] = "group_members"
-        target_member_count = max(group_end_id - (group_start_id + 1), 0)
+
+        # 通过拓扑信息查找该组长负责的所有成员（parent_id == gl_id）
+        members: List[int] = []
+        for node_id in range(n):
+            info = get_topology_info(session, node_id, current_view)
+            if info.get("parent_id") == gl_id and info["role"] == "member":
+                members.append(node_id)
+
+        target_member_count = len(members)
         if target_member_count > 0:
             count_message_sent(session_id, is_broadcast=False, target_count=target_member_count)
-        for member_id in range(group_start_id + 1, group_end_id):
+
+        for member_id in members:
             member_sid = node_sockets.get(session_id, {}).get(member_id)
             if member_sid:
                 if should_deliver_message(session_id):
                     await sio.emit("message_received", forward_message, room=member_sid)
+                    print(f"[路由] Node {gl_id} -> Node {member_id} (Role: member)")
                 else:
                     print(f"[网络模拟] Proposal 转发消息被丢弃 (目标: Member {member_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
     await sio.emit("message_received", message, room=session_id)

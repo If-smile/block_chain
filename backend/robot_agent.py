@@ -304,10 +304,14 @@ async def robot_send_pre_prepare(
 
     # 根据通用拓扑引擎确定所有组长（不包括 Global Leader 自己）
     group_leaders: List[int] = []
+    proposer_group_members: List[int] = []
     for node_id in range(n):
         info = get_topology_info(session, node_id, current_view)
         if info["role"] == "group_leader" and node_id != proposer_id:
             group_leaders.append(node_id)
+        # Proposer 自己组内的成员（parent_id == proposer_id 且角色为 member），必须直接收到 Proposal
+        if info["role"] == "member" and info.get("parent_id") == proposer_id:
+            proposer_group_members.append(node_id)
     if group_leaders:
         count_message_sent(session_id, is_broadcast=False, target_count=len(group_leaders))
     for gl_id in group_leaders:
@@ -341,6 +345,22 @@ async def robot_send_pre_prepare(
                     print(f"[路由] Node {gl_id} -> Node {member_id} (Role: member)")
                 else:
                     print(f"[网络模拟] Proposal 转发消息被丢弃 (目标: Member {member_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
+    # Proposer 向自己所在小组成员直接广播 Proposal，避免提案孤岛
+    if proposer_group_members:
+        count_message_sent(session_id, is_broadcast=False, target_count=len(proposer_group_members))
+        for member_id in proposer_group_members:
+            member_sid = node_sockets.get(session_id, {}).get(member_id)
+            if member_sid:
+                if should_deliver_message(session_id):
+                    await sio.emit("message_received", message, room=member_sid)
+                    print(f"[路由] Node {proposer_id} -> Node {member_id} (Role: member, same group as root)")
+                else:
+                    print(
+                        f"[网络模拟] Proposal 转发消息被丢弃 (目标: Member {member_id}, 传递率: "
+                        f"{session['config'].get('messageDeliveryRate', 100)}%)"
+                    )
+
+    # 仍然向会话房间广播，用于前端动画展示
     await sio.emit("message_received", message, room=session_id)
     print(
         f"[双层 HotStuff] Global Leader {proposer_id} (View {current_view}) 发送了 Proposal 消息: "

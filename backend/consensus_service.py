@@ -197,7 +197,8 @@ class ConsensusService:
             "view": view,
             "round": current_round,
             "is_group_vote": True,
-            "weight": len(group_voters),
+            # 组内一旦达阈值，组长上报时代表整个小组的权重
+            "weight": group_size,
             "group_id": voter_info["group_id"],
             "group_voters": list(group_voters),
             "timestamp": datetime.now().isoformat(),
@@ -313,8 +314,14 @@ class ConsensusService:
                 }
             )
 
+        # 记录权重统计日志
         threshold = get_quorum_threshold(session)
         total_weight = pending[key]["total_weight"]
+        group_id = vote_message.get("group_id", voter_info.get("group_id"))
+        print(
+            f"[权重统计] 收到来自组 {group_id} 的 QC/投票，贡献权重 {vote_weight}，"
+            f"当前总权重 {total_weight}/{threshold}"
+        )
 
         if total_weight < threshold:
             return {

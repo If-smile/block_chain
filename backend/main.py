@@ -141,15 +141,24 @@ async def run_simulation(request: SimulationRequest):
     success_count = 0
     total_latency = 0.0
 
-    # 每完成 5% 的进度向前端广播一次进度（约 20 次更新）
-    update_interval = max(1, rounds // 20)
+    # 每完成 1% 的进度向前端广播一次进度（约 100 次更新），用于绘制收敛曲线
+    update_interval = max(1, rounds // 100)
 
     for i in range(rounds):
-        # 进度广播（全局，不区分前端页面）
+        # 进度广播（全局，不区分前端页面），同时带上当前轮数与成功率
         if i % update_interval == 0 or i == rounds - 1:
             progress_pct = int((i / rounds) * 100)
+            current_round_num = i + 1
+            current_rate = (success_count / current_round_num * 100) if current_round_num > 0 else 0.0
             try:
-                await sio.emit("simulation_progress", {"progress": progress_pct})
+                await sio.emit(
+                    "simulation_progress",
+                    {
+                        "progress": progress_pct,
+                        "current_round": current_round_num,
+                        "success_rate": current_rate,
+                    },
+                )
             except Exception:
                 # 忽略连接错误，避免影响极速仿真
                 pass

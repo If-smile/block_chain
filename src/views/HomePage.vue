@@ -211,13 +211,20 @@
                   </el-button>
                 </div>
 
-                <div v-if="showSimulationProgress" style="margin-top: 15px;">
+                <div
+                  v-show="showSimulationProgress || simulationResult"
+                  style="margin-top: 20px; padding: 15px; background: #fff; border-radius: 8px; box-shadow: 0 2px 12px 0 rgba(0,0,0,0.1);"
+                >
                   <el-progress
+                    v-if="showSimulationProgress"
                     :percentage="simulationProgress"
                     :text-inside="true"
                     :stroke-width="20"
                     status="success"
+                    style="margin-bottom: 15px;"
                   />
+
+                  <div ref="chartRef" style="width: 100%; height: 350px;"></div>
                 </div>
 
                 <el-card
@@ -424,6 +431,7 @@ import {
 import QRCode from 'qrcode'
 import axios from 'axios'
 import io from 'socket.io-client'
+import * as echarts from 'echarts'
 import { useSessionStore } from '@/stores/sessionStore'
 import Topology from '@/components/Topology.vue'
 import HotStuffTable from '@/components/HotStuffTable.vue'
@@ -459,6 +467,10 @@ export default {
     const currentRound = ref(1)
     const currentSimulation = ref(null)
     const topologyRef = ref(null)
+
+    const chartRef = ref(null)
+    let convergenceChart = null
+    const chartData = ref([])
 
     const formData = reactive({
       nodeCount: 20,
@@ -594,11 +606,63 @@ export default {
       }
     })
 
+    const updateChart = (round, rate) => {
+      if (!convergenceChart && chartRef.value) {
+        convergenceChart = echarts.init(chartRef.value)
+      }
+
+      if (convergenceChart && typeof round === 'number' && typeof rate === 'number') {
+        chartData.value.push([round, rate])
+
+        const option = {
+          title: {
+            text: 'Law of Large Numbers Convergence',
+            left: 'center',
+            textStyle: { fontSize: 14 }
+          },
+          tooltip: {
+            trigger: 'axis',
+            formatter: 'Round: {c[0]}<br/>Reliability: {c[1]}%'
+          },
+          grid: { left: '10%', right: '5%', bottom: '15%', top: '20%' },
+          xAxis: {
+            type: 'value',
+            name: 'Rounds',
+            nameLocation: 'middle',
+            nameGap: 25,
+            max: monteCarloRounds.value
+          },
+          yAxis: {
+            type: 'value',
+            name: 'Reliability (%)',
+            min: 0,
+            max: 100,
+            axisLabel: { formatter: '{value}%' }
+          },
+          series: [
+            {
+              data: chartData.value,
+              type: 'line',
+              smooth: true,
+              showSymbol: false,
+              itemStyle: { color: '#67C23A' },
+              lineStyle: { width: 2 }
+            }
+          ]
+        }
+
+        convergenceChart.setOption(option)
+      }
+    }
+
     onMounted(() => {
       simulationSocket.value = io(window.location.origin)
       simulationSocket.value.on('simulation_progress', (data) => {
         if (data && typeof data.progress === 'number') {
           simulationProgress.value = data.progress
+        }
+        if (data && typeof data.current_round === 'number' && typeof data.success_rate === 'number') {
+          updateChart(data.current_round, data.success_rate)
         }
       })
     })
@@ -607,6 +671,10 @@ export default {
       if (simulationSocket.value) {
         simulationSocket.value.disconnect()
         simulationSocket.value = null
+      }
+      if (convergenceChart) {
+        convergenceChart.dispose()
+        convergenceChart = null
       }
     })
 
@@ -689,10 +757,14 @@ export default {
         return
       }
 
-      // 重置进度与结果
+      // 重置进度、结果与收敛图
       simulationResult.value = null
       simulationProgress.value = 0
       showSimulationProgress.value = true
+      chartData.value = []
+      if (convergenceChart) {
+        convergenceChart.clear()
+      }
 
       simulationLoading.value = true
       try {
@@ -758,7 +830,8 @@ export default {
       onRoundChange,
       playAnimation,
       demoLeader,
-      runSimulation
+      runSimulation,
+      chartRef
     }
   }
 }

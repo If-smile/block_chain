@@ -5,18 +5,18 @@ import time
 import sys
 import socketio
 
-# 接口地址配置
+# API Configuration
 API_URL = "http://127.0.0.1:8000/api/simulate"
 SOCKET_URL = "http://127.0.0.1:8000"
 
-# 实验参数设置
+# Experiment Parameters
 ROUNDS = 1000
-DELIVERY_RATES = [95, 85]  # 测试正相关与负相关两种网络环境
+DELIVERY_RATES = [95, 85]  # Testing positive and negative correlation environments
 node_configs = [9, 16, 20, 25, 36]
 
 results = []
 
-# 1. 初始化 Socket.IO 客户端用于接收进度
+# 1. Initialize Socket.IO client for progress tracking
 sio = socketio.Client()
 
 @sio.on('simulation_progress')
@@ -25,42 +25,42 @@ def on_progress(data):
     round_num = data.get('current_round', 0)
     rate = data.get('success_rate', 0.0)
     
-    # 绘制终端进度条 (长度 40)
+    # Draw terminal progress bar (length 40)
     bar_length = 40
     filled_len = int(bar_length * progress // 100)
     bar = '█' * filled_len + '-' * (bar_length - filled_len)
     
-    # 使用 \r 实现在同一行刷新输出，不换行
-    sys.stdout.write(f'\r      [{bar}] {progress}% | 轮次: {round_num}/{ROUNDS} | 实时成功率: {rate:.2f}%   ')
+    # Use \r to refresh on the same line without newline
+    sys.stdout.write(f'\r      [{bar}] {progress}% | Round: {round_num}/{ROUNDS} | Real-time Rate: {rate:.2f}%   ')
     sys.stdout.flush()
 
 def run_experiment():
-    print("🚀 开始执行实验二：规模悖论自动化测试 (带实时进度条)...\n")
+    print("🚀 Starting Experiment 2: Scaling Paradox Automated Test (with real-time progress)...\n")
     start_total_time = time.time()
     
-    # 尝试连接到后端的 WebSocket 服务
+    # Attempt to connect to backend WebSocket
     try:
         sio.connect(SOCKET_URL)
-        print("📡 已成功连接到后端 WebSocket，实时进度监听开启。")
+        print("📡 Successfully connected to backend WebSocket. Real-time progress monitoring active.")
     except Exception as e:
-        print(f"⚠️ 无法连接到 WebSocket ({e})，不影响测试，但不会显示进度条。")
+        print(f"⚠️ Could not connect to WebSocket ({e}). Test will proceed, but progress bar will not be shown.")
 
     for dr in DELIVERY_RATES:
         print(f"\n========================================================")
-        print(f"🌐 当前测试网络环境: Delivery Rate = {dr}%")
+        print(f"🌐 Current Network Environment: Delivery Rate = {dr}%")
         print(f"========================================================")
         
         for n in node_configs:
             k = max(1, round(math.sqrt(n)))
             f = (n - 1) // 3
             
-            print(f"\n▶ 正在运行: {n} 节点, {k} 分组, 容错 {f} 节点...")
+            print(f"\n▶ Running: {n} Nodes, {k} Groups, Fault Tolerance: {f} Nodes...")
             
             payload = {
                 "config": {
                     "nodeCount": n,
                     "faultyNodes": f,
-                    "robotNodes": n,  # [核心修复]：强制所有节点存活，消除死节点干扰
+                    "robotNodes": n,  # [Core fix]: Force all nodes to be alive, eliminating dead node interference
                     "topology": "full", 
                     "branchCount": k,
                     "messageDeliveryRate": dr,
@@ -74,8 +74,8 @@ def run_experiment():
             try:
                 start_req_time = time.time()
                 
-                # 发送 HTTP 仿真请求（超时放宽至 1500 秒以应对低送达率场景）
-                # requests 是阻塞的，但 sio 运行在后台线程，进度条会正常刷新
+                # Send HTTP simulation request (timeout relaxed to 1500s for low delivery rate scenarios)
+                # requests is blocking, but sio runs in a background thread, so progress bar updates normally
                 response = requests.post(API_URL, json=payload, timeout=1500)
                 response.raise_for_status()
                 data = response.json()
@@ -83,10 +83,10 @@ def run_experiment():
                 
                 rel_pct = data['reliability'] * 100
                 
-                # 请求完成后，强制打印 100% 进度条并换行收尾
-                sys.stdout.write(f'\r      [{"█" * 40}] 100% | 轮次: {ROUNDS}/{ROUNDS} | 最终成功率: {rel_pct:.2f}%     \n')
+                # Force print 100% progress bar and add newline upon completion
+                sys.stdout.write(f'\r      [{"█" * 40}] 100% | Round: {ROUNDS}/{ROUNDS} | Final Rate: {rel_pct:.2f}%     \n')
                 sys.stdout.flush()
-                print(f"   ✅ 完成! 最终成功率: {rel_pct:.2f}% (本组耗时 {req_time:.2f}s)")
+                print(f"   ✅ Completed! Final Success Rate: {rel_pct:.2f}% (Time taken: {req_time:.2f}s)")
                 
                 results.append({
                     "Delivery Rate (%)": dr,
@@ -100,20 +100,20 @@ def run_experiment():
                 })
                 
             except Exception as e:
-                print(f"\n   ❌ 失败: {e}")
+                print(f"\n   ❌ Failed: {e}")
 
-    # 实验结束，断开长连接
+    # Disconnect after experiment finishes
     if sio.connected:
         sio.disconnect()
 
-    # 导出数据到 CSV
+    # Export data to CSV
     df = pd.DataFrame(results)
     output_file = "Experiment2_Scaling_Results.csv"
     df.to_csv(output_file, index=False, encoding='utf-8-sig')
 
     end_total_time = time.time()
-    print(f"\n🎉 全部实验完成！总耗时: {end_total_time - start_total_time:.2f} 秒")
-    print(f"📊 数据已成功导出至当前目录的: {output_file}")
+    print(f"\n🎉 All experiments completed! Total time: {end_total_time - start_total_time:.2f} seconds")
+    print(f"📊 Data successfully exported to current directory: {output_file}")
 
 if __name__ == "__main__":
     run_experiment()

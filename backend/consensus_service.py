@@ -197,8 +197,8 @@ class ConsensusService:
             "view": view,
             "round": current_round,
             "is_group_vote": True,
-            # 组内一旦达阈值，组长上报时代表整个小组的权重
-            "weight": group_size,
+            # BFT 安全：权重 = 实际票数，使全局 total_weight 与 2f+1 语义一致
+            "weight": len(group_voters),
             "group_id": voter_info["group_id"],
             "group_voters": list(group_voters),
             "timestamp": datetime.now().isoformat(),

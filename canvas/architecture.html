@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HotStuff System Architecture</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Space+Grotesk:wght@300;400;600;700&display=swap');
+
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #1c2128;
+    --border: #30363d;
+    --accent-blue: #388bfd;
+    --accent-green: #3fb950;
+    --accent-orange: #d29922;
+    --accent-purple: #8b949e;
+    --accent-red: #f85149;
+    --accent-cyan: #39d353;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #484f58;
+    --glow-blue: rgba(56,139,253,0.15);
+    --glow-green: rgba(63,185,80,0.15);
+    --glow-orange: rgba(210,153,34,0.12);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    font-family: 'Space Grotesk', sans-serif;
+    color: var(--text-primary);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  .canvas-root {
+    width: 1200px;
+    margin: 0 auto;
+    padding: 40px 24px 60px;
+  }
+
+  /* ─── Title ─── */
+  .title-block {
+    text-align: center;
+    margin-bottom: 48px;
+  }
+  .title-block h1 {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--text-primary);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .title-block .subtitle {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  /* ─── Layers ─── */
+  .layer {
+    position: relative;
+    margin-bottom: 16px;
+  }
+  .layer-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+    padding-left: 4px;
+  }
+
+  /* ─── Row of boxes ─── */
+  .row {
+    display: flex;
+    gap: 12px;
+    align-items: stretch;
+  }
+
+  /* ─── Box ─── */
+  .box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    flex: 1;
+    position: relative;
+    transition: border-color 0.2s;
+  }
+  .box:hover { border-color: var(--accent-blue); }
+
+  .box .box-icon {
+    font-size: 20px;
+    margin-bottom: 6px;
+    display: block;
+  }
+  .box .box-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+  }
+  .box .box-subtitle {
+    font-size: 11px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
+  .box .box-badge {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 4px;
+    letter-spacing: 0.08em;
+  }
+
+  /* color themes */
+  .box.blue   { border-left: 3px solid var(--accent-blue);   background: linear-gradient(135deg, var(--surface) 0%, rgba(56,139,253,0.05) 100%); }
+  .box.green  { border-left: 3px solid var(--accent-green);  background: linear-gradient(135deg, var(--surface) 0%, rgba(63,185,80,0.05) 100%);  }
+  .box.orange { border-left: 3px solid var(--accent-orange); background: linear-gradient(135deg, var(--surface) 0%, rgba(210,153,34,0.05) 100%); }
+  .box.purple { border-left: 3px solid var(--accent-purple); background: linear-gradient(135deg, var(--surface) 0%, rgba(139,148,158,0.05) 100%);}
+  .box.red    { border-left: 3px solid var(--accent-red);    background: linear-gradient(135deg, var(--surface) 0%, rgba(248,81,73,0.05) 100%);  }
+
+  .badge-blue   { background: rgba(56,139,253,0.15);  color: var(--accent-blue);   }
+  .badge-green  { background: rgba(63,185,80,0.15);   color: var(--accent-green);  }
+  .badge-orange { background: rgba(210,153,34,0.15);  color: var(--accent-orange); }
+  .badge-red    { background: rgba(248,81,73,0.15);   color: var(--accent-red);    }
+  .badge-purple { background: rgba(139,148,158,0.15); color: var(--accent-purple); }
+
+  /* ─── Arrows between layers ─── */
+  .arrow-row {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 24px;
+    margin: 4px 0;
+    height: 32px;
+  }
+  .arrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+    flex: 1;
+  }
+  .arrow-line {
+    width: 1px;
+    height: 16px;
+    background: linear-gradient(to bottom, var(--border), transparent);
+    position: relative;
+  }
+  .arrow-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text-muted);
+    letter-spacing: 0.1em;
+    white-space: nowrap;
+    text-align: center;
+  }
+  .arrow-down {
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1;
+  }
+
+  /* ─── Wide connector bars ─── */
+  .connector {
+    display: flex;
+    align-items: center;
+    margin: 4px 0;
+    gap: 0;
+  }
+  .connector-line {
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+  .connector-text {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text-muted);
+    letter-spacing: 0.1em;
+    padding: 0 12px;
+    white-space: nowrap;
+  }
+  .connector-arrow {
+    font-size: 10px;
+    color: var(--text-muted);
+  }
+
+  /* ─── DB Schema box ─── */
+  .schema-box {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    flex: 1;
+  }
+  .schema-box .schema-title {
+    color: var(--accent-orange);
+    font-weight: 700;
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  .schema-field {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 4px;
+    align-items: baseline;
+  }
+  .schema-field .fname {
+    color: var(--accent-blue);
+    min-width: 100px;
+    font-size: 10px;
+  }
+  .schema-field .ftype {
+    color: var(--accent-green);
+    font-size: 9px;
+  }
+  .schema-field .fdesc {
+    color: var(--text-muted);
+    font-size: 9px;
+  }
+  .schema-pk { color: var(--accent-orange) !important; }
+  .schema-fk { color: var(--accent-red) !important; }
+
+  /* ─── Divider ─── */
+  .divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 24px 0;
+  }
+
+  /* ─── Flow diagram (simulation path) ─── */
+  .flow {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+  .flow-step {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 7px 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    position: relative;
+  }
+  .flow-step.highlight-blue  { border-color: var(--accent-blue);   color: var(--accent-blue);   background: rgba(56,139,253,0.08);  }
+  .flow-step.highlight-green { border-color: var(--accent-green);  color: var(--accent-green);  background: rgba(63,185,80,0.08);   }
+  .flow-step.highlight-orange{ border-color: var(--accent-orange); color: var(--accent-orange); background: rgba(210,153,34,0.08);  }
+  .flow-arrow {
+    color: var(--text-muted);
+    font-size: 12px;
+    padding: 0 6px;
+    flex-shrink: 0;
+  }
+  .flow-skip {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--accent-red);
+    padding: 0 4px;
+    white-space: nowrap;
+  }
+
+  /* ─── Legend ─── */
+  .legend {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    margin-top: 24px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--text-secondary);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+
+  /* Animated glow on special boxes */
+  @keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 0 0 transparent; }
+    50% { box-shadow: 0 0 16px 2px var(--glow-blue); }
+  }
+  .box.glow { animation: pulse-glow 3s ease-in-out infinite; }
+</style>
+</head>
+<body>
+<div class="canvas-root">
+
+  <!-- Title -->
+  <div class="title-block">
+    <h1>HotStuff Distributed Consensus System</h1>
+    <div class="subtitle">SQLite · FastAPI · Socket.IO · Vue 3 — Architecture Flowchart</div>
+  </div>
+
+  <!-- ── Layer 1: Frontend ── -->
+  <div class="layer">
+    <div class="layer-label">① Frontend (Vue 3 + Element-Plus)</div>
+    <div class="row">
+      <div class="box blue">
+        <span class="box-icon">🖥️</span>
+        <div class="box-title">HomePage.vue</div>
+        <div class="box-subtitle">配置面板 · Run Simulation<br>ECharts 收敛图 · 进度条</div>
+        <span class="box-badge badge-blue">SPA</span>
+      </div>
+      <div class="box blue">
+        <span class="box-icon">📊</span>
+        <div class="box-title">HotStuffTable.vue</div>
+        <div class="box-subtitle">共识历史表格<br>各节点状态展示</div>
+        <span class="box-badge badge-blue">UI</span>
+      </div>
+      <div class="box blue">
+        <span class="box-icon">🔗</span>
+        <div class="box-title">Topology.vue</div>
+        <div class="box-subtitle">网络拓扑可视化<br>节点连接动画</div>
+        <span class="box-badge badge-blue">UI</span>
+      </div>
+      <div class="box blue">
+        <span class="box-icon">🗂️</span>
+        <div class="box-title">sessionStore (Pinia)</div>
+        <div class="box-subtitle">全局 sessionId / config<br>前端状态管理</div>
+        <span class="box-badge badge-purple">Store</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Arrow 1→2 -->
+  <div class="arrow-row">
+    <div class="arrow">
+      <div class="arrow-label">POST /api/sessions</div>
+      <div class="arrow-down">↓</div>
+    </div>
+    <div class="arrow">
+      <div class="arrow-label">GET /api/sessions/:id/history</div>
+      <div class="arrow-down">↓</div>
+    </div>
+    <div class="arrow">
+      <div class="arrow-label">POST /api/simulate</div>
+      <div class="arrow-down">↓</div>
+    </div>
+    <div class="arrow">
+      <div class="arrow-label">Socket.IO (ws://)</div>
+      <div class="arrow-down">↕</div>
+    </div>
+  </div>
+
+  <!-- ── Layer 2: FastAPI ── -->
+  <div class="layer">
+    <div class="layer-label">② Backend — FastAPI + Socket.IO (main.py)</div>
+    <div class="row">
+      <div class="box green glow">
+        <span class="box-icon">⚡</span>
+        <div class="box-title">POST /api/sessions</div>
+        <div class="box-subtitle">create_session(config)<br>注入 is_simulation=False<br>写入 SQLite sessions</div>
+        <span class="box-badge badge-green">HTTP</span>
+      </div>
+      <div class="box green">
+        <span class="box-icon">📜</span>
+        <div class="box-title">GET /api/sessions/:id/history</div>
+        <div class="box-subtitle">load_history(session_id)<br>返回所有轮次 JSON<br>支持 ?round=N 过滤</div>
+        <span class="box-badge badge-green">HTTP</span>
+      </div>
+      <div class="box green">
+        <span class="box-icon">🎲</span>
+        <div class="box-title">POST /api/simulate</div>
+        <div class="box-subtitle">N 轮无头 headless 仿真<br>is_simulation=True 跳过 DB<br>emit simulation_progress</div>
+        <span class="box-badge badge-orange">MC</span>
+      </div>
+      <div class="box green">
+        <span class="box-icon">🔌</span>
+        <div class="box-title">Socket.IO Server</div>
+        <div class="box-subtitle">connect / disconnect<br>vote / proposal 事件<br>message_received 动画推送</div>
+        <span class="box-badge badge-blue">WS</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Arrow 2→3 -->
+  <div class="arrow-row">
+    <div class="arrow">
+      <div class="arrow-label">create_session() / finalize_consensus()</div>
+      <div class="arrow-down">↓</div>
+    </div>
+    <div class="arrow">
+      <div class="arrow-label">socket events → handle_*</div>
+      <div class="arrow-down">↓</div>
+    </div>
+    <div class="arrow">
+      <div class="arrow-label">robot_agent triggers</div>
+      <div class="arrow-down">↓</div>
+    </div>
+    <div class="arrow">
+      <div class="arrow-label">topology_manager lookup</div>
+      <div class="arrow-down">↓</div>
+    </div>
+  </div>
+
+  <!-- ── Layer 3: Core Logic ── -->
+  <div class="layer">
+    <div class="layer-label">③ Core Logic Layer</div>
+    <div class="row">
+      <div class="box orange">
+        <span class="box-icon">🏛️</span>
+        <div class="box-title">socket_handlers.py</div>
+        <div class="box-subtitle">handle_consensus_timeout<br>send_prepare / send_commit<br>finalize_consensus<br>start_next_round</div>
+        <span class="box-badge badge-orange">Handler</span>
+      </div>
+      <div class="box orange">
+        <span class="box-icon">🤖</span>
+        <div class="box-title">robot_agent.py</div>
+        <div class="box-subtitle">robot_send_pre_prepare<br>trigger_robot_votes<br>should_deliver_message<br>动态路由 parent_id</div>
+        <span class="box-badge badge-orange">Robot</span>
+      </div>
+      <div class="box orange">
+        <span class="box-icon">⚙️</span>
+        <div class="box-title">consensus_service.py</div>
+        <div class="box-subtitle">_process_member_vote<br>_process_global_vote<br>weight = len(group_voters)<br>QC 生成与分发</div>
+        <span class="box-badge badge-orange">BFT</span>
+      </div>
+      <div class="box purple">
+        <span class="box-icon">🗺️</span>
+        <div class="box-title">topology_manager.py</div>
+        <div class="box-subtitle">_build_groups(N, K)<br>get_topology_info()<br>role: root / group_leader / member</div>
+        <span class="box-badge badge-purple">Topo</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Arrow 3→4 -->
+  <div class="arrow-row">
+    <div class="arrow">
+      <div class="arrow-label">get_quorum_threshold(2f+1)</div>
+      <div class="arrow-down">↓</div>
+    </div>
+    <div class="arrow">
+      <div class="arrow-label">sessions / connected_nodes / node_sockets</div>
+      <div class="arrow-down">↕</div>
+    </div>
+    <div class="arrow">
+      <div class="arrow-label">is_simulation → skip DB</div>
+      <div class="arrow-down">↓</div>
+    </div>
+    <div class="arrow">
+      <div class="arrow-label">upsert_session / append_history</div>
+      <div class="arrow-down">↓</div>
+    </div>
+  </div>
+
+  <!-- ── Layer 4: Infrastructure ── -->
+  <div class="layer">
+    <div class="layer-label">④ Infrastructure Layer</div>
+    <div class="row">
+      <div class="box purple">
+        <span class="box-icon">🧠</span>
+        <div class="box-title">state.py (In-Memory)</div>
+        <div class="box-subtitle">sessions: Dict<br>connected_nodes: Dict<br>node_sockets: Dict<br>should_deliver_message()</div>
+        <span class="box-badge badge-purple">RAM</span>
+      </div>
+      <div class="box purple">
+        <span class="box-icon">📐</span>
+        <div class="box-title">consensus_engine.py</div>
+        <div class="box-subtitle">get_quorum_threshold → 2f+1<br>get_local_quorum_threshold<br>qc_extends / check_safe_node</div>
+        <span class="box-badge badge-purple">Math</span>
+      </div>
+      <div class="box orange">
+        <span class="box-icon">🗄️</span>
+        <div class="box-title">database.py</div>
+        <div class="box-subtitle">init_db() / upsert_session()<br>append_history() / load_history()<br>_sanitize_session_data()</div>
+        <span class="box-badge badge-orange">SQLite</span>
+      </div>
+      <div class="box purple">
+        <span class="box-icon">📋</span>
+        <div class="box-title">models.py</div>
+        <div class="box-subtitle">SessionConfig (Pydantic)<br>参数校验 · nodeCount<br>faultyNodes / branchCount</div>
+        <span class="box-badge badge-purple">Schema</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Arrow 4→5 -->
+  <div class="arrow-row">
+    <div class="arrow">
+      <div class="arrow-label">sqlite3.connect(blockchain_sim.db)</div>
+      <div class="arrow-down">↓</div>
+    </div>
+    <div class="arrow" style="flex:3">
+      <div class="arrow-label">PRAGMA foreign_keys=ON · INSERT OR REPLACE · SELECT</div>
+      <div class="arrow-down">↓</div>
+    </div>
+    <div class="arrow">
+      <div class="arrow-label">startup: load_all_sessions()</div>
+      <div class="arrow-down">↕</div>
+    </div>
+  </div>
+
+  <!-- ── Layer 5: SQLite Schema ── -->
+  <div class="layer">
+    <div class="layer-label">⑤ SQLite — blockchain_sim.db</div>
+    <div class="row">
+      <div class="schema-box">
+        <div class="schema-title">TABLE sessions</div>
+        <div class="schema-field"><span class="fname schema-pk">session_id</span><span class="ftype">TEXT PK</span><span class="fdesc">UUID 会话主键</span></div>
+        <div class="schema-field"><span class="fname">config</span><span class="ftype">TEXT JSON</span><span class="fdesc">nodeCount/branchCount/…</span></div>
+        <div class="schema-field"><span class="fname">state</span><span class="ftype">TEXT JSON</span><span class="fdesc">完整会话状态快照</span></div>
+        <div class="schema-field"><span class="fname">updated_at</span><span class="ftype">TEXT</span><span class="fdesc">ISO 时间戳</span></div>
+      </div>
+      <div class="schema-box" style="margin-left:12px;">
+        <div class="schema-title">TABLE history</div>
+        <div class="schema-field"><span class="fname schema-pk">id</span><span class="ftype">INTEGER PK</span><span class="fdesc">自增主键</span></div>
+        <div class="schema-field"><span class="fname schema-fk">session_id</span><span class="ftype">TEXT FK</span><span class="fdesc">→ sessions.session_id (CASCADE)</span></div>
+        <div class="schema-field"><span class="fname">round</span><span class="ftype">INTEGER</span><span class="fdesc">共识轮次编号</span></div>
+        <div class="schema-field"><span class="fname">data</span><span class="ftype">TEXT JSON</span><span class="fdesc">单轮共识完整历史</span></div>
+        <div class="schema-field"><span class="fname">created_at</span><span class="ftype">TEXT</span><span class="fdesc">ISO 时间戳</span></div>
+      </div>
+    </div>
+  </div>
+
+  <hr class="divider">
+
+  <!-- Simulation fast path -->
+  <div class="layer">
+    <div class="layer-label">🎲 Monte Carlo Simulation Fast Path (is_simulation=True)</div>
+    <div class="flow">
+      <div class="flow-step highlight-blue">POST /api/simulate</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step highlight-blue">create_session(is_sim=True)</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">robot_agent auto-vote</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">consensus_service<br>_process_*_vote</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step highlight-green">finalize_consensus</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step highlight-orange">emit simulation_progress</div>
+      <div class="flow-arrow">→</div>
+      <span class="flow-skip">⚡ SKIP DB</span>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">del session / cleanup</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step highlight-green">return { reliability, avg_latency }</div>
+    </div>
+  </div>
+
+  <hr class="divider">
+
+  <!-- Normal demo path -->
+  <div class="layer">
+    <div class="layer-label">🔵 Normal Demo Path (is_simulation=False)</div>
+    <div class="flow">
+      <div class="flow-step highlight-blue">Human joins via QR / URL</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">WebSocket connect</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">handle_consensus_timeout (40s)</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">send_prepare / send_commit</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step highlight-green">finalize_consensus</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step highlight-orange">upsert_session() ✓</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step highlight-orange">append_history() ✓</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">start_next_round (10s)</div>
+    </div>
+  </div>
+
+  <!-- Legend -->
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent-blue)"></div>Frontend / HTTP Request</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent-green)"></div>FastAPI Route / Response</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent-orange)"></div>Core BFT Logic / SQLite</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent-purple)"></div>State / Engine / Models</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent-red)"></div>Skipped in Simulation Mode</div>
+  </div>
+
+</div>
+</body>
+</html>

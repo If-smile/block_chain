@@ -11,8 +11,9 @@ SOCKET_URL = "http://127.0.0.1:8000"
 
 # Experiment Parameters
 ROUNDS = 1000
-DELIVERY_RATES = [95, 85]  # Testing positive and negative correlation environments
-node_configs = [9, 16, 20, 25, 36]
+DELIVERY_RATES = list(range(85, 101))  # 85, 86, ..., 100
+# 去掉 9 节点（3 人组在 BFT 理论上不完整），加入 40 和 49 展示自动分组能力
+node_configs = [16, 20, 25, 36, 40, 49]
 
 results = []
 

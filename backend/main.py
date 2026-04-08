@@ -139,7 +139,10 @@ async def run_simulation(request: SimulationRequest):
         raise HTTPException(status_code=400, detail=f"Invalid config: {e}")
 
     success_count = 0
+    first_view_success_count = 0
     total_latency = 0.0
+    # 允许仿真在同一轮内经历若干次 View Change 后继续收敛，避免“换主即失败”的系统性偏差。
+    max_round_wait_seconds = 3.0
 
     # 每完成 1% 的进度向前端广播一次进度（约 100 次更新），用于绘制收敛曲线
     update_interval = max(1, rounds // 100)
@@ -178,13 +181,13 @@ async def run_simulation(request: SimulationRequest):
         start_time = time.perf_counter()
         initial_view = session.get("current_view", 0)
 
-        # 4. 轮询等待结果或视图变更 / 超时
+        # 4. 轮询等待结果（允许视图切换）或超时
         decided = False
         while True:
             now = time.perf_counter()
             elapsed = now - start_time
-            if elapsed > 1.0:
-                # 超过 1.0 秒仍未达成共识，视为本轮失败
+            if elapsed > max_round_wait_seconds:
+                # 超过总预算仍未达成共识，视为本轮失败
                 break
 
             session = get_session(session_id)
@@ -194,13 +197,11 @@ async def run_simulation(request: SimulationRequest):
             consensus = session.get("consensus_result")
             if consensus:
                 success_count += 1
+                current_view = session.get("current_view", initial_view)
+                if current_view == initial_view:
+                    first_view_success_count += 1
                 total_latency += elapsed
                 decided = True
-                break
-
-            current_view = session.get("current_view", initial_view)
-            if current_view != initial_view and not consensus:
-                # 发生 View Change 且尚未达成共识，视为本轮放弃
                 break
 
             await asyncio.sleep(0.01)
@@ -214,13 +215,17 @@ async def run_simulation(request: SimulationRequest):
             del node_sockets[session_id]
 
     reliability = success_count / rounds if rounds > 0 else 0.0
+    first_view_reliability = first_view_success_count / rounds if rounds > 0 else 0.0
     average_latency = (total_latency / success_count) if success_count > 0 else 0.0
 
     return {
         "reliability": reliability,
+        "first_view_reliability": first_view_reliability,
         "average_latency": average_latency,
         "rounds": rounds,
         "success_count": success_count,
+        "first_view_success_count": first_view_success_count,
+        "max_round_wait_seconds": max_round_wait_seconds,
     }
 
 @app.get("/api/sessions/{session_id}")

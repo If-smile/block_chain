@@ -12,10 +12,10 @@ API_URL = "http://127.0.0.1:8000/api/simulate"
 SOCKET_URL = "http://127.0.0.1:8000"
 
 # Default experiment parameters
-DEFAULT_ROUNDS = 3000
-DEFAULT_DELIVERY_RATES = [95, 98, 99]
-DEFAULT_NODE_START = 53
-DEFAULT_NODE_END = 200
+DEFAULT_ROUNDS = 1000
+DEFAULT_DELIVERY_RATES = [90, 92, 94, 95, 96]
+DEFAULT_NODE_START = 16
+DEFAULT_NODE_END = 100
 
 # 1. Initialize Socket.IO client for progress tracking
 sio = socketio.Client()
@@ -40,7 +40,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run Monte Carlo scaling experiments with resume support.")
     parser.add_argument("--node-start", type=int, default=DEFAULT_NODE_START, help="Start node count (inclusive)")
     parser.add_argument("--node-end", type=int, default=DEFAULT_NODE_END, help="End node count (inclusive)")
-    parser.add_argument("--step", type=int, default=1, help="Node count step")
+    parser.add_argument("--step", type=int, default=2, help="Node count step")
     parser.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS, help="Simulation rounds per case")
     parser.add_argument(
         "--delivery-rates",
@@ -51,7 +51,7 @@ def parse_args():
     )
     parser.add_argument(
         "--output",
-        default="Experiment2_Scaling_Results_53_200.csv",
+        default="Experiment2_Scaling_Results_16_100_DR90_96_step2.csv",
         help="Output CSV path",
     )
     parser.add_argument(
@@ -140,11 +140,19 @@ def run_experiment(args):
                 req_time = time.time() - start_req_time
                 
                 rel_pct = data['reliability'] * 100
+                first_view_rel = data.get('first_view_reliability')
+                first_view_pct = (first_view_rel * 100) if first_view_rel is not None else None
                 
                 # Force print 100% progress bar and add newline upon completion
                 sys.stdout.write(f'\r      [{"█" * 40}] 100% | Round: {args.rounds}/{args.rounds} | Final Rate: {rel_pct:.2f}%     \n')
                 sys.stdout.flush()
-                print(f"   ✅ Completed! Final Success Rate: {rel_pct:.2f}% (Time taken: {req_time:.2f}s)")
+                if first_view_pct is not None:
+                    print(
+                        f"   ✅ Completed! Final={rel_pct:.2f}%, First-View={first_view_pct:.2f}% "
+                        f"(Time taken: {req_time:.2f}s)"
+                    )
+                else:
+                    print(f"   ✅ Completed! Final Success Rate: {rel_pct:.2f}% (Time taken: {req_time:.2f}s)")
                 
                 row = {
                     "Delivery Rate (%)": dr,
@@ -154,6 +162,8 @@ def run_experiment(args):
                     "Total Rounds": data['rounds'],
                     "Success Rate (%)": f"{rel_pct:.2f}%",
                     "Raw Reliability": data['reliability'],
+                    "First-View Success Rate (%)": f"{first_view_pct:.2f}%" if first_view_pct is not None else "",
+                    "First-View Raw Reliability": first_view_rel if first_view_rel is not None else "",
                     "Avg Latency (ms)": round(data['average_latency'] * 1000, 2)
                 }
                 results.append(row)

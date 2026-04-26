@@ -142,9 +142,9 @@ def create_session(config: SessionConfig, is_simulation: bool = False) -> Sessio
         except Exception as e:
             print(f"[database] 保存初始会话 {session_id} 失败: {e}")
     
-    # 创建机器人节点并立即开始共识（start_pbft_process 由本模块定义，注入为回调）
+    # 创建机器人节点并立即开始共识（start_hotstuff_process 由本模块定义，注入为回调）
     asyncio.create_task(
-        create_robot_nodes_and_start(session_id, config.robotNodes, start_pbft_process_cb=start_pbft_process)
+        create_robot_nodes_and_start(session_id, config.robotNodes, start_hotstuff_process_cb=start_hotstuff_process)
     )
     
     return {
@@ -1234,9 +1234,9 @@ async def broadcast_to_online_nodes(session_id: str, event: str, data: Any):
     # 机器人节点不需要接收WebSocket消息，因为它们在后端自动处理
 
 
-async def start_pbft_process(session_id: str):
+async def start_hotstuff_process(session_id: str):
     """
-    启动 HotStuff 共识流程（函数名保留为 start_pbft_process 以兼容旧代码）
+    启动 HotStuff 共识流程
     
     对于第一个 View（View 0），Leader 直接发送 Proposal（不需要 New-View）
     """

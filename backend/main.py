@@ -31,7 +31,7 @@ from topology_manager import get_topology_info, is_connection_allowed
 import database
 
 # 创建FastAPI应用
-app = FastAPI(title="分布式PBFT共识系统", version="1.0.0")
+app = FastAPI(title="分布式HotStuff共识系统", version="1.0.0")
 
 # 配置CORS
 app.add_middleware(

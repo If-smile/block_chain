@@ -204,9 +204,9 @@ async def create_robot_nodes_and_start(
     session_id: str,
     robot_count: int,
     *,
-    start_pbft_process_cb: Callable[[str], Awaitable[None]],
+    start_hotstuff_process_cb: Callable[[str], Awaitable[None]],
 ) -> None:
-    """创建机器人节点并立即启动 HotStuff 流程。start_pbft_process_cb 由 socket_handlers 注入。"""
+    """创建机器人节点并立即启动 HotStuff 流程。start_hotstuff_process_cb 由 socket_handlers 注入。"""
     session = get_session(session_id)
     if not session:
         return
@@ -226,8 +226,8 @@ async def create_robot_nodes_and_start(
             "sent_prepare": False,
             "sent_commit": False,
         }
-    print(f"机器人节点准备完毕，立即开始PBFT共识流程")
-    await start_pbft_process_cb(session_id)
+    print(f"机器人节点准备完毕，立即开始HotStuff共识流程")
+    await start_hotstuff_process_cb(session_id)
 
 
 # ==================== 机器人投票触发与发送 ====================

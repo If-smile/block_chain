@@ -1,5 +1,5 @@
 {
-  "name": "distributed-pbft",
+  "name": "distributed-hotstuff",
   "private": true,
   "version": "1.0.0",
   "type": "module",

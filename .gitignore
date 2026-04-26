@@ -102,3 +102,4 @@ pids/
 # SQLite databases
 *.db
 *.db-journal
+/.claude

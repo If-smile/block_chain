@@ -1,9 +1,7 @@
 # Multi-Layer HotStuff 分布式共识实验平台
 
-这是一个基于 `Vue 3 + FastAPI + Socket.IO` 的交互式共识实验系统，当前主线协议为 **Multi-Layer HotStuff**。  
+这是一个基于 `Vue 3 + FastAPI + Socket.IO` 的交互式共识实验系统，协议为 **Multi-Layer HotStuff**。  
 项目支持在线多节点协作、拜占庭场景开关、Monte Carlo 无头仿真，以及会话状态持久化恢复。
-
-> 说明：仓库中仍可能存在少量 `PBFT` 命名（历史组件名或文档遗留），不代表当前主线协议。
 
 ## 核心能力
 
@@ -76,7 +74,7 @@ npm run dev
 d:/block_chain
 ├── src/
 │   ├── views/                # HomePage / JoinPage / NodePage
-│   └── components/           # Topology / HotStuffTable / PBFTTable(历史命名)
+│   └── components/           # Topology / HotStuffTable
 ├── backend/
 │   ├── main.py               # FastAPI 入口与 API 路由
 │   ├── socket_handlers.py    # 会话管理与 Socket 事件

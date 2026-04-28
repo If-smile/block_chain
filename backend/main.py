@@ -1,12 +1,12 @@
 """
-FastAPI 应用入口点
- 
-此文件作为应用的入口点，负责：
-- 初始化 FastAPI 应用
-- 配置 CORS
-- 创建 Socket.IO 服务器和应用
-- 定义 HTTP 路由
-- 启动服务器
+FastAPI application entry point.
+
+This file is responsible for:
+- Initialising the FastAPI application
+- Configuring CORS
+- Creating the Socket.IO server and ASGI app
+- Defining HTTP routes
+- Starting the server
 """
 
 from fastapi import FastAPI, HTTPException
@@ -17,23 +17,23 @@ import socketio
 import asyncio
 import time
 
-# 导入全局状态和 Socket.IO 服务器
+# Global state and Socket.IO server
 from state import sio, sessions, connected_nodes, node_sockets, get_session
 
-# 导入数据模型
+# Data models
 from models import SessionConfig
 
-# 导入业务逻辑函数
+# Business logic
 from socket_handlers import create_session
 from topology_manager import get_topology_info, is_connection_allowed
 
-# 持久化模块
+# Persistence module
 import database
 
-# 创建FastAPI应用
+# Create FastAPI application
 app = FastAPI(title="分布式HotStuff共识系统", version="1.0.0")
 
-# 配置CORS
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -42,62 +42,62 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 创建ASGI应用（sio 从 state 模块导入）
+# Create ASGI app (sio imported from state module)
 socket_app = socketio.ASGIApp(sio, app)
 
-# 导入 Socket.IO 事件处理（确保事件处理器被注册）
-import socket_handlers  # 这会注册所有 @sio.event 装饰器
+# Import Socket.IO event handlers (registers all @sio.event decorators)
+import socket_handlers
 
 
-# ==================== 启动时加载持久化会话 ====================
+# ==================== Startup: restore persisted sessions ====================
 
 @app.on_event("startup")
 async def on_startup():
-    """应用启动时初始化 SQLite，并恢复会话状态"""
+    """Initialise SQLite on startup and restore previously persisted session state."""
     database.init_db()
 
-    # 从数据库加载所有会话状态
+    # Load all session states from the database
     persisted_sessions = database.load_all_sessions()
-    print(f"[startup] 从 SQLite 加载 {len(persisted_sessions)} 个会话")
+    print(f"[startup] Loaded {len(persisted_sessions)} session(s) from SQLite")
 
     for session_id, state in persisted_sessions.items():
-        # 防御性处理：确保是 dict
+        # Defensive: skip malformed entries
         if not isinstance(state, dict):
             continue
 
-        # 如果之前是 running 状态，重启后无法恢复后台任务，统一恢复为 waiting
+        # Running sessions cannot be resumed after restart — reset to waiting
         if state.get("status") == "running":
             state["status"] = "waiting"
             state["phase"] = "waiting"
             state["phase_step"] = 0
 
-        # 恢复历史记录（从 history 表加载最新快照）
+        # Restore consensus history from the history table
         history_items = database.load_history(session_id)
         state["consensus_history"] = history_items
 
-        # 恢复到内存中的全局 sessions
+        # Restore into the global in-memory sessions dict
         sessions[session_id] = state
 
-        # 已连接节点列表可以从状态中恢复（如果没有则置空）
+        # Restore connected-node list (empty list if not present)
         connected_nodes[session_id] = state.get("connected_nodes", [])
-        # WebSocket 连接无法持久化，重启后需要重新连接
+        # WebSocket connections cannot be persisted — clients must reconnect
         node_sockets[session_id] = {}
 
-    print("[startup] 会话状态已从 SQLite 恢复到内存")
+    print("[startup] Session state restored from SQLite into memory")
 
 
-# ==================== HTTP 路由 & 请求模型 ====================
+# ==================== HTTP routes & request models ====================
 
 
 class SimulationRequest(BaseModel):
-    """Monte Carlo 仿真请求体"""
+    """Request body for the Monte Carlo simulation endpoint."""
     config: Dict[str, Any]
     rounds: int = 1000
 
 
 @app.post("/api/sessions")
 async def create_consensus_session(config: SessionConfig):
-    """创建新的共识会话"""
+    """Create a new consensus session."""
     try:
         session_info = create_session(config)
         return session_info
@@ -108,31 +108,32 @@ async def create_consensus_session(config: SessionConfig):
 @app.post("/api/simulate")
 async def run_simulation(request: SimulationRequest):
     """
-    Monte Carlo 极速仿真接口
-    
-    根据给定配置与轮次，在无头模式下连续运行多轮共识并返回统计结果。
+    Monte Carlo headless simulation endpoint.
+
+    Runs multiple consensus rounds in headless mode for the given configuration
+    and returns aggregated reliability statistics.
     """
     config_data = dict(request.config or {})
 
-    # 基本参数校验
+    # Basic parameter validation
     if "nodeCount" not in config_data:
         raise HTTPException(status_code=400, detail="config.nodeCount is required")
     node_count = config_data["nodeCount"]
     faulty_nodes = config_data.get("faultyNodes", 0)
 
-    # 如果未显式提供机器人节点数量，则按默认规则推导
+    # Derive robotNodes from nodeCount/faultyNodes if not explicitly provided
     if "robotNodes" not in config_data:
         config_data["robotNodes"] = max(node_count - faulty_nodes, 0)
 
-    # 仿真模式强制关闭恶意提议者
+    # Force-disable malicious proposer in simulation mode
     config_data["maliciousProposer"] = False
 
-    # 轮次数校验
+    # Validate round count
     rounds = request.rounds or 1000
     if rounds <= 0:
         raise HTTPException(status_code=400, detail="rounds must be positive")
 
-    # 将 dict 转为 SessionConfig 以复用现有创建逻辑
+    # Convert dict to SessionConfig to reuse existing session-creation logic
     try:
         session_config = SessionConfig(**config_data)
     except Exception as e:
@@ -141,14 +142,15 @@ async def run_simulation(request: SimulationRequest):
     success_count = 0
     first_view_success_count = 0
     total_latency = 0.0
-    # 允许仿真在同一轮内经历若干次 View Change 后继续收敛，避免“换主即失败”的系统性偏差。
+    # Allow multiple view-changes within a single round before timing out,
+    # preventing a systematic bias where any view-change counts as a failure.
     max_round_wait_seconds = 3.0
 
-    # 每完成 1% 的进度向前端广播一次进度（约 100 次更新），用于绘制收敛曲线
+    # Broadcast progress roughly every 1% (≈100 updates) for convergence plots
     update_interval = max(1, rounds // 100)
 
     for i in range(rounds):
-        # 进度广播（全局，不区分前端页面），同时带上当前轮数与成功率
+        # Broadcast progress (global, page-agnostic) with current round and success rate
         if i % update_interval == 0 or i == rounds - 1:
             progress_pct = int((i / rounds) * 100)
             current_round_num = i + 1
@@ -163,31 +165,31 @@ async def run_simulation(request: SimulationRequest):
                     },
                 )
             except Exception:
-                # 忽略连接错误，避免影响极速仿真
+                # Ignore connection errors — don't let them disrupt the simulation
                 pass
 
-        # 1. 创建全新 session
+        # 1. Create a fresh session for this round
         session_info = create_session(session_config, is_simulation=True)
         session_id = session_info["sessionId"]
 
-        # 2. 在会话配置中关闭恶意 Leader（仿真模式下已在创建时注入 is_simulation）
+        # 2. Ensure malicious proposer is disabled (already injected via is_simulation)
         session = get_session(session_id)
         if not session:
             continue
         session.setdefault("config", {})
         session["config"]["maliciousProposer"] = False
 
-        # 3. 记录起始视图与起始时间
+        # 3. Record start view and wall-clock time
         start_time = time.perf_counter()
         initial_view = session.get("current_view", 0)
 
-        # 4. 轮询等待结果（允许视图切换）或超时
+        # 4. Poll for consensus result; allow view-changes within the time budget
         decided = False
         while True:
             now = time.perf_counter()
             elapsed = now - start_time
             if elapsed > max_round_wait_seconds:
-                # 超过总预算仍未达成共识，视为本轮失败
+                # Budget exhausted without consensus — count as failure
                 break
 
             session = get_session(session_id)
@@ -206,7 +208,7 @@ async def run_simulation(request: SimulationRequest):
 
             await asyncio.sleep(0.01)
 
-        # 本轮结束后立即清理内存中的 session，防止大量无头会话堆积
+        # Clean up the session immediately after each round to prevent memory growth
         if session_id in sessions:
             del sessions[session_id]
         if session_id in connected_nodes:
@@ -230,16 +232,16 @@ async def run_simulation(request: SimulationRequest):
 
 @app.get("/api/sessions/{session_id}")
 async def get_session_info(session_id: str):
-    """获取会话信息"""
+    """Return session information."""
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    # 创建一个可序列化的副本，排除不可序列化的字段
+
+    # Build a serialisable copy, excluding non-serialisable fields
     session_copy = {}
     for key, value in session.items():
         if key == "timeout_task":
-            # 跳过 asyncio 任务对象
+            # Skip asyncio Task objects
             continue
         session_copy[key] = value
     
@@ -247,15 +249,15 @@ async def get_session_info(session_id: str):
 
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str):
-    """删除会话并停止所有相关进程"""
+    """Delete a session and stop all associated processes."""
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    # 停止会话
+
+    # Mark session as stopped
     session["status"] = "stopped"
-    
-    # 清理会话数据
+
+    # Clean up session data
     if session_id in sessions:
         del sessions[session_id]
     if session_id in connected_nodes:
@@ -263,13 +265,13 @@ async def delete_session(session_id: str):
     if session_id in node_sockets:
         del node_sockets[session_id]
     
-    print(f"会话 {session_id} 已被删除并停止")
+    print(f"[delete_session] Session {session_id} deleted and stopped")
     
     return {"message": "Session deleted"}
 
 @app.get("/api/sessions/{session_id}/status")
 async def get_session_status(session_id: str):
-    """获取会话状态"""
+    """Return the current status of a session."""
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -284,16 +286,16 @@ async def get_session_status(session_id: str):
 
 @app.post("/api/sessions/{session_id}/assign-node")
 async def assign_node(session_id: str):
-    """自动分配节点"""
+    """Automatically assign the next available node to a new participant."""
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    # 获取已连接的节点
+
+    # Get currently connected nodes
     connected = connected_nodes.get(session_id, [])
     total_nodes = session["config"]["nodeCount"]
-    
-    # 找到第一个可用的节点
+
+    # Find the first unoccupied node slot
     available_node = None
     for i in range(total_nodes):
         if i not in connected:
@@ -313,7 +315,7 @@ async def assign_node(session_id: str):
 
 @app.get("/api/sessions/{session_id}/connected-nodes")
 async def get_connected_nodes(session_id: str):
-    """获取已连接的节点列表"""
+    """Return the list of connected nodes for a session."""
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -327,23 +329,34 @@ async def get_connected_nodes(session_id: str):
 
 @app.get("/api/sessions/{session_id}/history")
 async def get_session_history(session_id: str, round: Optional[int] = None):
-    """获取会话的真实消息历史，适配 HotStuff 表格和动画（支持双层分层动画）"""
+    """
+    Return message history for the given session, used by the frontend table and animation.
+
+    - Without ``round``: returns a list of completed round numbers for this session.
+    - With ``round``: returns the full message sequence (table_messages) and
+      the frame-by-frame animation sequence (animation_sequence) for that round,
+      supporting both single-layer and double-layer topologies.
+    """
     from typing import List, Dict, Any
-    
+
+    # ---------------------------------------------------------------
+    # 1. Session validation & basic config extraction
+    # ---------------------------------------------------------------
     session = get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     config = session["config"]
     messages = session["messages"]
     n = config["nodeCount"]
     topology = config["topology"]
     branch_count = config.get("branchCount", 2)
     is_double_layer = branch_count > 1 and n >= branch_count * 2
-    
-    # 1. 确定轮次范围
+
+    # ---------------------------------------------------------------
+    # 2. No round param: return round list only (early return)
+    # ---------------------------------------------------------------
     if round is None:
-        # 获取所有存在的轮次
         all_rounds = set()
         for key in ["pre_prepare", "vote", "qc"]:
             for msg in messages.get(key, []):
@@ -357,10 +370,13 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
             "totalRounds": len(target_rounds)
         }
 
-    # === 关键修复：从历史消息中提取该轮次的真实 View ===
-    target_view = round  # 默认 fallback（假设 round 等于 view）
-    
-    # 尝试从该轮次的消息中获取真实 view
+    # ---------------------------------------------------------------
+    # 3. Resolve the final View for this round
+    #    A round may span multiple view-changes; take the highest view
+    #    (the one that reached consensus) to avoid mixing timed-out and
+    #    successful messages in the animation.
+    # ---------------------------------------------------------------
+    target_view = round  # fallback: use round number when messages carry no view field
     all_round_msgs = []
     if messages.get("pre_prepare"):
         all_round_msgs.extend([m for m in messages["pre_prepare"] if m.get("round") == round])
@@ -368,63 +384,69 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
         all_round_msgs.extend([m for m in messages["vote"] if m.get("round") == round])
     if messages.get("qc"):
         all_round_msgs.extend([m for m in messages["qc"] if m.get("round") == round])
-    
-    # 1. 确定该轮次的最终视图 (Target View)
+
     if all_round_msgs:
-        # 找出该轮次涉及的所有 view，取最大值（通常是最终达成共识的 view）
         views = set(m.get("view") for m in all_round_msgs if "view" in m)
         if views:
             target_view = max(views)
-    
-    # 计算历史时刻的 Global Leader（使用历史视图）
-    historical_leader_id = target_view % n
-    print(f"[get_session_history] Round {round}: 过滤显示最终 View {target_view}, Leader ID = {historical_leader_id}")
 
-    # 2. 准备数据容器
-    table_messages: List[Dict[str, Any]] = []      # 表格用（合并广播，含phase）
-    animation_sequence: List[List[Dict[str, Any]]] = []  # 动画用（拆分广播，按步骤）
-    
-    # 辅助函数：按轮次过滤
+    historical_leader_id = target_view % n
+    print(f"[get_session_history] Round {round}: showing final view {target_view}, leader ID = {historical_leader_id}")
+
+    # ---------------------------------------------------------------
+    # 4. Data containers & helper functions
+    # ---------------------------------------------------------------
+    table_messages: List[Dict[str, Any]] = []            # Table view: merged broadcasts, with phase
+    animation_sequence: List[List[Dict[str, Any]]] = []  # Animation: split broadcasts, per frame
+
     def get_msgs(key, r):
+        """Filter raw message list by type key and round number."""
         return [m for m in messages.get(key, []) if m.get("round") == r]
-    
-    # 辅助函数：按视图过滤消息（只保留属于 target_view 的消息）
-    # 这样可以避免 View 0 (超时) 和 View 1 (成功) 的消息混在一起导致动画错乱
+
     def filter_msgs_by_view(msgs, view):
+        """Keep only messages that belong to the given view."""
         return [m for m in msgs if m.get("view") == view]
-    
-    # 辅助函数：获取节点的拓扑信息（强制使用历史视图）
+
     def get_node_topology(node_id):
+        """Return topology-role information for a node at the historical view."""
         return get_topology_info(session, node_id, view=target_view)
 
-    # 使用过滤后的消息列表：只保留属于 target_view 的消息
+    # ---------------------------------------------------------------
+    # 5. Message pre-filtering: keep only messages from target_view
+    # ---------------------------------------------------------------
     round_pre_prepare = filter_msgs_by_view(get_msgs("pre_prepare", round), target_view)
-    round_votes = filter_msgs_by_view(get_msgs("vote", round), target_view)
-    round_qc = filter_msgs_by_view(get_msgs("qc", round), target_view)
+    round_votes       = filter_msgs_by_view(get_msgs("vote", round),        target_view)
+    round_qc          = filter_msgs_by_view(get_msgs("qc", round),          target_view)
 
-    # === 构建 HotStuff 7步 流程（支持双层分层动画）===
+    # ---------------------------------------------------------------
+    # 6. Build HotStuff 7-step animation sequence
+    #    Each step corresponds to one protocol message flow.
+    #    Double-layer mode splits each broadcast into two sub-frames (a/b).
+    #    Steps 1 / 3 / 5 / 7 : Leader broadcast (proposal or QC)
+    #    Steps 2 / 4 / 6     : Replica vote
+    # ---------------------------------------------------------------
 
     # Step 1: Proposal (Leader -> All) [Phase: Prepare]
     step1_anim: List[Dict[str, Any]] = []
     for msg in round_pre_prepare:
-        # 表格数据：保留广播，添加 phase
+        # Table entry: keep broadcast, annotate phase
         table_msg = msg.copy()
-        table_msg["phase"] = "prepare" 
+        table_msg["phase"] = "prepare"
         table_msg["type"] = "proposal"
         table_msg["dst"] = "All" if msg.get("to") == "all" else msg.get("to")
         table_messages.append(table_msg)
 
-        # 动画数据：拆分广播
+        # Animation entry: split the broadcast into per-link frames
         src = msg["from"]
         value = msg.get("value")
-        
+
         if is_double_layer:
-            # 双层模式：Root -> Group Leaders -> Members（分两步）
-            # 子帧 1: Root -> Group Leaders
+            # Double-layer: Root -> Group Leaders -> Members (two sub-frames)
+            # Sub-frame 1: Root -> Group Leaders
             step1a: List[Dict[str, Any]] = []
-            # 子帧 2: Group Leaders -> Members
+            # Sub-frame 2: Group Leaders -> Members
             step1b: List[Dict[str, Any]] = []
-            
+
             for dst in range(n):
                 if dst == src:
                     continue
@@ -432,16 +454,16 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                 if dst_info["role"] == "group_leader":
                     step1a.append({"src": src, "dst": dst, "value": value, "type": "proposal", "dst_type": "group_leaders"})
                 elif dst_info["role"] == "member":
-                    # 找到该 Member 的 Group Leader
+                    # Forward via this member's Group Leader
                     gl_id = dst_info["parent_id"]
                     step1b.append({"src": gl_id, "dst": dst, "value": value, "type": "proposal", "dst_type": "group_members"})
-            
+
             if step1a:
                 animation_sequence.append(step1a)
             if step1b:
                 animation_sequence.append(step1b)
         else:
-            # 单层模式：直接广播
+            # Single-layer: direct broadcast
             if msg.get("to") == "all":
                 for dst in range(n):
                     if dst != src and is_connection_allowed(src, dst, n, topology, branch_count):
@@ -460,23 +482,23 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
             table_messages.append(m)
     
     if is_double_layer:
-        # 双层模式：Member -> Group Leader -> Root（分两步）
-        # 子帧 1: Member -> Group Leader
+        # Double-layer: Member -> Group Leader -> Root (two sub-frames)
+        # Sub-frame 1: Member -> Group Leader
         step2a: List[Dict[str, Any]] = []
-        # 子帧 2: Group Leader -> Root
+        # Sub-frame 2: Group Leader -> Root
         step2b: List[Dict[str, Any]] = []
-        
+
         for vote in step2_votes:
             src_id = vote["src"]
             src_info = get_node_topology(src_id)
             dst_id = vote["dst"]
-            
+
             if src_info["role"] == "member":
-                # Member 投票给 Group Leader
+                # Member votes to its Group Leader
                 gl_id = src_info["parent_id"]
                 step2a.append({"src": src_id, "dst": gl_id, "value": vote["value"], "type": "vote", "phase": "prepare"})
             elif src_info["role"] == "group_leader" and dst_id == historical_leader_id:
-                # Group Leader 投票给 Root（使用历史 Leader ID）
+                # Group Leader aggregates and votes to Root (historical leader ID)
                 step2b.append({"src": src_id, "dst": dst_id, "value": vote["value"], "type": "vote", "phase": "prepare"})
         
         if step2a:
@@ -490,20 +512,20 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     # Step 3: Pre-Commit QC (Leader -> All) [Phase: Pre-Commit]
     step3_anim: List[Dict[str, Any]] = []
     for msg in round_qc:
-        if msg.get("phase") == "prepare":  # Prepare QC 开启 Pre-Commit 阶段
-            # 表格数据
+        if msg.get("phase") == "prepare":  # Prepare QC triggers the Pre-Commit phase
+            # Table entry
             table_msg = msg.copy()
             table_msg["phase"] = "pre-commit"
             table_msg["type"] = "qc"
             table_msg["dst"] = "All" if msg.get("to") == "all" else msg.get("to")
             table_messages.append(table_msg)
-            
-            # 动画数据
+
+            # Animation entry
             src = msg["from"]
             value = msg.get("qc", {}).get("value")
-            
+
             if is_double_layer:
-                # 双层模式：Root -> Group Leaders -> Members（分两步）
+                # Double-layer: Root -> Group Leaders -> Members (two sub-frames)
                 step3a: List[Dict[str, Any]] = []
                 step3b: List[Dict[str, Any]] = []
                 
@@ -550,7 +572,7 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                 gl_id = src_info["parent_id"]
                 step4a.append({"src": src_id, "dst": gl_id, "value": vote["value"], "type": "vote", "phase": "pre-commit"})
             elif src_info["role"] == "group_leader" and dst_id == historical_leader_id:
-                # Group Leader 投票给 Root（使用历史 Leader ID）
+                # Group Leader aggregates and votes to Root (historical leader ID)
                 step4b.append({"src": src_id, "dst": dst_id, "value": vote["value"], "type": "vote", "phase": "pre-commit"})
         
         if step4a:
@@ -564,15 +586,15 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     # Step 5: Commit QC (Leader -> All) [Phase: Commit]
     step5_anim: List[Dict[str, Any]] = []
     for msg in round_qc:
-        if msg.get("phase") == "pre-commit":  # Pre-Commit QC 开启 Commit 阶段
-            # 表格数据
+        if msg.get("phase") == "pre-commit":  # Pre-Commit QC triggers the Commit phase
+            # Table entry
             table_msg = msg.copy()
             table_msg["phase"] = "commit"
             table_msg["type"] = "qc"
             table_msg["dst"] = "All" if msg.get("to") == "all" else msg.get("to")
             table_messages.append(table_msg)
 
-            # 动画数据
+            # Animation entry
             src = msg["from"]
             value = msg.get("qc", {}).get("value")
             
@@ -623,7 +645,7 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                 gl_id = src_info["parent_id"]
                 step6a.append({"src": src_id, "dst": gl_id, "value": vote["value"], "type": "vote", "phase": "commit"})
             elif src_info["role"] == "group_leader" and dst_id == historical_leader_id:
-                # Group Leader 投票给 Root（使用历史 Leader ID）
+                # Group Leader aggregates and votes to Root (historical leader ID)
                 step6b.append({"src": src_id, "dst": dst_id, "value": vote["value"], "type": "vote", "phase": "commit"})
         
         if step6a:
@@ -637,15 +659,15 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
     # Step 7: Decide QC (Leader -> All) [Phase: Decide]
     step7_anim: List[Dict[str, Any]] = []
     for msg in round_qc:
-        if msg.get("phase") == "commit":  # Commit QC 开启 Decide 阶段
-            # 表格数据
+        if msg.get("phase") == "commit":  # Commit QC triggers the Decide phase
+            # Table entry
             table_msg = msg.copy()
             table_msg["phase"] = "decide"
             table_msg["type"] = "qc"
             table_msg["dst"] = "All" if msg.get("to") == "all" else msg.get("to")
             table_messages.append(table_msg)
 
-            # 动画数据
+            # Animation entry
             src = msg["from"]
             value = msg.get("qc", {}).get("value")
             
@@ -675,16 +697,18 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                 if step7_anim:
                     animation_sequence.append(step7_anim)
 
-    # === 修复：从 consensus_history 中查找对应轮次的统计数据 ===
+    # ---------------------------------------------------------------
+    # 7. Look up historical stats snapshot from consensus_history
+    #    Prefer the snapshot to avoid mixing next-round live data into
+    #    the current round's display.  Fall back to consensus_result if
+    #    the history entry has not been written yet (just completed).
+    # ---------------------------------------------------------------
     round_consensus = "Consensus in progress..."
     complexity_comparison = None
-    # 默认为空，避免显示当前正在进行的下一轮的即时数据（那样不准确）
     historical_network_stats = {}
-    
-    # 遍历历史记录找到对应轮次
+
     found_history = False
     for history in session.get("consensus_history", []):
-        # 确保比较的是 int 类型
         if history.get("round") == round:
             found_history = True
             round_consensus = f"{history.get('status', 'Unknown')}: {history.get('description', '')}"
@@ -693,27 +717,28 @@ async def get_session_history(session_id: str, round: Optional[int] = None):
                 complexity_comparison = stats_data.get("complexity_comparison")
                 historical_network_stats = stats_data.get("network_stats", {})
             break
-    
-    # (可选) 如果是查看刚刚完成的最新一轮，且还没写入 history（极少情况），可回退读取 consensus_result
+
+    # Fallback: latest round just completed but not yet written to history
     if not found_history and session.get("consensus_result"):
-        # 简单校验一下 stats 是否存在
         if session["consensus_result"].get("stats"):
-            # 这里不做严格 round 校验了，作为最后一道防线
             complexity_comparison = session["consensus_result"]["stats"].get("complexity_comparison")
             historical_network_stats = session["consensus_result"]["stats"].get("network_stats", {})
-    
+
+    # ---------------------------------------------------------------
+    # 8. Assemble and return response
+    # ---------------------------------------------------------------
     return {
         "round": round,
-        "leaderId": historical_leader_id,  # 返回历史时刻的 Leader ID
-        "messages": table_messages,               # 表格数据（含phase，未拆分广播）
-        "animation_sequence": animation_sequence, # 动画数据（支持分层，按步骤）
+        "leaderId": historical_leader_id,          # Leader ID at the historical view
+        "messages": table_messages,                # Table data (with phase, broadcasts not split)
+        "animation_sequence": animation_sequence,  # Animation data (layered, per step)
         "consensus": round_consensus,
         "nodeCount": config["nodeCount"],
         "topology": config["topology"],
         "proposalValue": config["proposalValue"],
         "stats": {
             "complexity_comparison": complexity_comparison,
-            # 优先使用历史快照的 network_stats
+            # Prefer historical snapshot's network_stats
             "network_stats": historical_network_stats if historical_network_stats else session.get("network_stats", {})
         } if complexity_comparison else None
     }

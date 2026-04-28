@@ -14,19 +14,21 @@ from topology_manager import get_current_leader, get_topology_info
 
 class ConsensusService:
     """
-    负责纯粹的共识状态机逻辑：
-    - 消息校验（视图、角色、目标等）
-    - 阈值统计和 QC 生成
-    - SafeNode 检查
-    - lockedQC / prepareQC 更新
-    - 共识结果与复杂度统计计算
+    Pure consensus state-machine logic.
 
-    约束：
-    - 不依赖 Socket.IO （无 sio、无 emit）
-    - 不做任何网络发送或持久化，只读写传入的 session 状态
+    Responsibilities:
+    - Message validation (view, role, destination)
+    - Vote aggregation and QC generation
+    - SafeNode predicate evaluation
+    - lockedQC / prepareQC updates
+    - Consensus result and complexity statistics
+
+    Constraints:
+    - No Socket.IO dependency (no sio, no emit calls)
+    - No network I/O or persistence; only reads/writes the session dict
     """
 
-    # ==================== Proposal 处理 ====================
+    # ==================== Proposal handling ====================
 
     def handle_proposal(
         self,
@@ -35,13 +37,13 @@ class ConsensusService:
         node_id: int,
     ) -> Dict[str, Any]:
         """
-        处理 Replica 节点收到的 Proposal 消息（HotStuff PRE-PREPARE）
+        Process a Proposal message received by a replica node (HotStuff Prepare phase).
 
-        返回：
+        Returns:
             {
-                "accepted": bool,          # 是否通过 SafeNode 检查
-                "buffered": bool,          # 是否被缓冲
-                "reason": str,             # 日志原因
+                "accepted": bool,   # True if SafeNode check passed
+                "buffered": bool,   # True if message was buffered for a future view
+                "reason":   str,    # Human-readable log reason
             }
         """
         proposal_view = proposal_msg.get("view", -1)
@@ -50,7 +52,7 @@ class ConsensusService:
         proposer_id = proposal_msg.get("from")
         current_view = session["current_view"]
 
-        # Proposal 的 view 大于当前 view，需要缓冲
+        # Future view: buffer the proposal for later processing
         if proposal_view > current_view:
             buffer = session.setdefault("message_buffer", {})
             node_buffer = buffer.setdefault(node_id, {})
@@ -63,7 +65,7 @@ class ConsensusService:
                 "reason": f"proposal_view {proposal_view} > current_view {current_view}, buffered",
             }
 
-        # Proposal 的 view 小于当前 view，忽略
+        # Stale view: discard
         if proposal_view < current_view:
             return {
                 "accepted": False,
@@ -71,7 +73,7 @@ class ConsensusService:
                 "reason": f"old proposal view {proposal_view} < current_view {current_view}, ignored",
             }
 
-        # 验证消息来自当前视图的 Leader（HotStuff 星型拓扑要求）
+        # Verify the proposal comes from the legitimate leader for this view
         leader_id = get_current_leader(session, proposal_view)
         if proposer_id != leader_id:
             return {
@@ -80,7 +82,7 @@ class ConsensusService:
                 "reason": f"proposal from non-leader {proposer_id}, leader is {leader_id}",
             }
 
-        # HotStuff SafeNode 谓词检查（Safety 的核心机制）
+        # HotStuff SafeNode predicate (core Safety mechanism)
         if not check_safe_node(session, node_id, proposal_view, proposal_value, proposal_qc):
             return {
                 "accepted": False,
@@ -94,7 +96,7 @@ class ConsensusService:
             "reason": f"SafeNode passed for node {node_id} at view {proposal_view}",
         }
 
-    # ==================== QC 处理 ====================
+    # ==================== QC handling ====================
 
     def handle_qc_for_node(
         self,
@@ -102,16 +104,14 @@ class ConsensusService:
         qc_msg: Dict[str, Any],
         node_id: int,
     ) -> None:
-        """
-        收到 QC 后更新节点的 prepareQC / lockedQC。
-        """
+        """Update a single node's prepareQC and (if Commit phase) lockedQC."""
         qc = qc_msg.get("qc", {})
         qc_phase = qc.get("phase", "")
 
-        # 更新 prepareQC / highQC（用于 New-View）
+        # Always update prepareQC / highQC (used in New-View message selection)
         update_node_prepare_qc(session, node_id, qc)
 
-        # Commit 阶段 QC 更新 lockedQC
+        # Commit-phase QC also updates lockedQC
         if qc_phase == "commit":
             update_node_locked_qc(session, node_id, qc)
 
@@ -120,14 +120,12 @@ class ConsensusService:
         session: Dict[str, Any],
         qc_msg: Dict[str, Any],
     ) -> None:
-        """
-        对所有节点应用 QC 更新（prepareQC / lockedQC）。
-        """
+        """Apply QC updates (prepareQC / lockedQC) to every node in the session."""
         n = session["config"]["nodeCount"]
         for node_id in range(n):
             self.handle_qc_for_node(session, qc_msg, node_id)
 
-    # ==================== 投票与 QC 聚合 ====================
+    # ==================== Vote aggregation & QC generation ====================
 
     def _process_member_vote(
         self,
@@ -136,14 +134,14 @@ class ConsensusService:
         vote_message: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        处理 Member -> Group Leader 的投票，负责：
-        - 校验投票目标
-        - 组内阈值统计
-        - 在达到阈值时生成 GroupVote（但不发送）
+        Process a Member -> Group Leader vote.
 
-        返回：
+        Accumulates votes in the local vote pool and, once the local quorum
+        threshold is reached, produces a GroupVote (without sending it).
+
+        Returns:
             {
-                "status": "pending" | "group_vote_generated" | "invalid_target",
+                "status":     "pending" | "group_vote_generated" | "invalid_target",
                 "group_vote": Optional[Dict[str, Any]]
             }
         """
@@ -160,7 +158,7 @@ class ConsensusService:
                 "group_vote": None,
             }
 
-        # 存储到组内投票池
+        # Accumulate vote in the local pool
         key = (view, phase, value, group_leader_id)
         pending_group_votes = session.setdefault("pending_group_votes", {})
         group_voters = pending_group_votes.setdefault(key, set())
@@ -170,22 +168,16 @@ class ConsensusService:
         local_threshold = get_local_quorum_threshold(session, group_size)
 
         if len(group_voters) < local_threshold:
-            return {
-                "status": "pending",
-                "group_vote": None,
-            }
+            return {"status": "pending", "group_vote": None}
 
-        # 该 (view, phase, group_leader_id) 已生成过 GroupVote，避免重复计数/发送
+        # Deduplicate: only generate one GroupVote per (view, phase, group_leader)
         generated_group_votes = session.setdefault("generated_group_votes", set())
         gv_key = (view, phase, group_leader_id)
         if gv_key in generated_group_votes:
-            return {
-                "status": "pending",
-                "group_vote": None,
-            }
+            return {"status": "pending", "group_vote": None}
         generated_group_votes.add(gv_key)
 
-        # 组内达到阈值且首次，生成 GroupVote（但不负责实际发送）
+        # Local quorum reached for the first time: generate GroupVote
         global_leader_id = get_current_leader(session, view)
         current_round = session.get("current_round", 1)
         group_vote_message = {
@@ -197,14 +189,14 @@ class ConsensusService:
             "view": view,
             "round": current_round,
             "is_group_vote": True,
-            # BFT 安全：权重 = 实际票数，使全局 total_weight 与 2f+1 语义一致
+            # BFT safety: weight = actual vote count, consistent with the 2f+1 global quorum
             "weight": len(group_voters),
             "group_id": voter_info["group_id"],
             "group_voters": list(group_voters),
             "timestamp": datetime.now().isoformat(),
         }
 
-        # 写入会话消息历史（纯状态更新）
+        # Persist to session message history (pure state update, no I/O)
         session["messages"]["vote"].append(group_vote_message)
 
         return {
@@ -220,19 +212,20 @@ class ConsensusService:
         voter_info: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        处理 Group Leader / Global Leader -> Global Leader 的投票聚合，负责：
-        - 校验目标是否为 Global Leader
-        - 权重累加
-        - 检查是否达到全局阈值并生成 QC（但不发送）
+        Process a Group Leader / Root -> Global Leader vote at the global level.
 
-        返回：
+        Accumulates weighted votes and, once the global quorum threshold is
+        reached, generates a QC and computes the broadcast routing table
+        (without performing any network I/O).
+
+        Returns:
             {
-                "status": "pending" | "invalid_target" | "ignored" | "qc_generated",
-                "qc_message": Optional[Dict[str, Any]],
-                "next_phase": Optional[str],
+                "status":       "pending" | "invalid_target" | "ignored" | "qc_generated",
+                "qc_message":   Optional[Dict[str, Any]],
+                "next_phase":   Optional[str],
                 "total_weight": int,
-                "threshold": int,
-                "routing": Optional[Dict[str, Any]]  # QC 分层广播的目标信息（节点 id）
+                "threshold":    int,
+                "routing":      Optional[Dict[str, Any]]  # node IDs for layered broadcast
             }
         """
         view = vote_message.get("view", session.get("current_view", 0))
@@ -243,7 +236,7 @@ class ConsensusService:
         is_group_vote = vote_message.get("is_group_vote", False)
         vote_weight = vote_message.get("weight", 1)
 
-        # 若会话已越过该 phase，不再处理，避免重复或过期投票
+        # Ignore votes for a phase the session has already advanced past
         if session.get("phase") != phase:
             return {
                 "status": "ignored",
@@ -256,7 +249,7 @@ class ConsensusService:
 
         global_leader_id = get_current_leader(session, view)
 
-        # 验证投票目标
+        # Validate that the vote is directed at the correct Global Leader
         if voter_role == "group_leader":
             if target_id != global_leader_id:
                 return {
@@ -278,7 +271,7 @@ class ConsensusService:
                     "routing": None,
                 }
         else:
-            # 非法角色
+            # Unknown role: reject
             return {
                 "status": "invalid_target",
                 "qc_message": None,
@@ -288,7 +281,7 @@ class ConsensusService:
                 "routing": None,
             }
 
-        # Global Leader 收集投票（包括 GroupVote 和直接投票）
+        # Accumulate weighted votes (GroupVotes and direct votes)
         key = (view, phase, value)
         pending = session.setdefault("pending_votes", {})
 
@@ -314,14 +307,10 @@ class ConsensusService:
                 }
             )
 
-        # 记录权重统计日志
         threshold = get_quorum_threshold(session)
         total_weight = pending[key]["total_weight"]
         group_id = vote_message.get("group_id", voter_info.get("group_id"))
-        print(
-            f"[权重统计] 收到来自组 {group_id} 的 QC/投票，贡献权重 {vote_weight}，"
-            f"当前总权重 {total_weight}/{threshold}"
-        )
+        print(f"[weight] group {group_id} contributed weight {vote_weight}, total {total_weight}/{threshold}")
 
         if total_weight < threshold:
             return {
@@ -333,7 +322,7 @@ class ConsensusService:
                 "routing": None,
             }
 
-        # 该 (view, phase) 已生成过 QC，只算统计不再重复生成/广播
+        # Deduplicate: only generate one QC per (view, phase)
         generated_qcs = session.setdefault("generated_qcs", set())
         qc_key = (view, phase)
         if qc_key in generated_qcs:
@@ -347,7 +336,7 @@ class ConsensusService:
             }
         generated_qcs.add(qc_key)
 
-        # 达到阈值且首次，生成 QC
+        # Global quorum reached for the first time: generate QC
         all_voters = set()
         for gv in pending[key]["group_votes"]:
             all_voters.update(gv.get("group_voters", [gv["from"]]))
@@ -378,20 +367,20 @@ class ConsensusService:
             "timestamp": datetime.now().isoformat(),
         }
 
-        # 写入会话历史（纯状态更新）
+        # Persist QC to session history (pure state update, no I/O)
         session["messages"]["qc"].append(qc_message)
 
-        # 计算分层广播的目标（纯 ID 计算，不涉及网络）
+        # Compute broadcast routing table (ID arithmetic only, no network calls)
         n = session["config"]["nodeCount"]
 
-        # 1) 找出所有组长（不包括 root）
+        # Step 1: collect all group leaders (excluding root)
         group_leaders: List[int] = []
         for node_id in range(n):
             info = get_topology_info(session, node_id, view)
             if info["role"] == "group_leader":
                 group_leaders.append(node_id)
 
-        # 2) 为每个组长收集组内成员（parent_id == 该组长）
+        # Step 2: map each group leader to its member nodes
         members_by_group_leader: Dict[int, List[int]] = {}
         for gl_id in group_leaders:
             members_by_group_leader[gl_id] = []
@@ -422,16 +411,18 @@ class ConsensusService:
         vote_message: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        双层 HotStuff 投票处理（纯逻辑版本）。
+        Entry point for vote processing in the double-layer HotStuff protocol.
 
-        不做任何网络发送，只更新 session 并返回需要网络层执行的动作：
+        Performs no network I/O; updates session state and returns an action
+        descriptor for the network layer to execute.
 
-        返回结构（根据场景部分字段可能缺失）：
+        Returns:
             {
-                "status": "buffered" | "ignored" | "pending" | "group_vote_generated" | "qc_generated",
-                "group_vote": Optional[Dict[str, Any]],
-                "qc_message": Optional[Dict[str, Any]],
-                "routing": Optional[Dict[str, Any]],   # QC 分层广播目标
+                "status":      "buffered" | "ignored" | "pending"
+                               | "group_vote_generated" | "qc_generated",
+                "group_vote":  Optional[Dict[str, Any]],
+                "qc_message":  Optional[Dict[str, Any]],
+                "routing":     Optional[Dict[str, Any]],  # layered broadcast targets
             }
         """
         view = vote_message.get("view", session.get("current_view", 0))
@@ -440,13 +431,13 @@ class ConsensusService:
         value = vote_message.get("value")
         current_view = session["current_view"]
 
-        # 视图检查：大于当前视图 -> 缓冲
+        # Future view: buffer for later
         if view > current_view:
             buffer = session.setdefault("message_buffer", {})
             buffer.setdefault(view, []).append(vote_message)
             return {"status": "buffered"}
 
-        # 小于当前视图 -> 忽略
+        # Stale view: discard
         if view < current_view:
             return {"status": "ignored"}
 
@@ -457,16 +448,16 @@ class ConsensusService:
         if voter_role == "member":
             result = self._process_member_vote(session, voter_info, vote_message)
             if result["status"] != "group_vote_generated":
-                # 尚未到阈值或目标非法
+                # Below local threshold or invalid target
                 return {
                     "status": result["status"],
                     "group_vote": result.get("group_vote"),
                 }
 
-            # 组内达到阈值，已经在 _process_member_vote 中生成了 GroupVote 并写入 session["messages"]["vote"]
+            # Local quorum reached: GroupVote already written to session["messages"]["vote"]
             group_vote = result["group_vote"]
 
-            # 同时在全局层面继续按投票处理（但这里仍然不做网络发送）
+            # Forward the GroupVote to the global aggregation layer
             global_result = self._process_global_vote(
                 session,
                 group_vote,
@@ -487,7 +478,7 @@ class ConsensusService:
                 "routing": global_result.get("routing"),
             }
 
-        # ========== Case B: Group Leader / Global Leader -> Global Leader ==========
+        # ========== Case B: Group Leader / Root -> Global Leader ==========
         if voter_role in ("group_leader", "root"):
             global_result = self._process_global_vote(
                 session,
@@ -501,10 +492,10 @@ class ConsensusService:
                 "routing": global_result.get("routing"),
             }
 
-        # 其他未知角色
+        # Unknown role
         return {"status": "ignored"}
 
-    # ==================== 共识完成统计（Shadow Calculation） ====================
+    # ==================== Consensus completion statistics (Shadow Calculation) ====================
 
     def finalize_consensus_state(
         self,
@@ -513,19 +504,19 @@ class ConsensusService:
         description: str = "Consensus completed",
     ) -> Dict[str, Any]:
         """
-        完成共识时，计算并更新会话内的共识结果和复杂度对比数据。
+        Compute and store consensus results and complexity comparison data when a round completes.
 
-        仅修改 session 内存，不做任何网络或数据库操作。
+        Only mutates the in-memory session dict — no network or database operations.
 
-        返回：
+        Returns:
             {
                 "consensus_result": Dict[str, Any],
-                "history_item": Dict[str, Any],
+                "history_item":     Dict[str, Any],
             }
         """
         current_view = session["current_view"]
         if session.get("consensus_finalized_view") == current_view:
-            # 已经计算过，直接返回现有结果
+            # Already computed for this view — return cached result
             return {
                 "consensus_result": session.get("consensus_result"),
                 "history_item": session["consensus_history"][-1]
@@ -541,7 +532,7 @@ class ConsensusService:
 
         config = session["config"]
 
-        # ================= 通信复杂度统计报告（4种算法对比） =================
+        # ================= Communication-complexity comparison (4 algorithms) =================
         network_stats = session.get("network_stats", {})
         actual_messages = network_stats.get("total_messages_sent", 0)
         n = config["nodeCount"]
@@ -550,7 +541,7 @@ class ConsensusService:
         k = max(1, branch_count)
         group_size = n // k if k > 0 else n
 
-        # Shadow 计算（本实现保持原有公式）
+        # Shadow message counts (theoretical baseline, using original formulae)
         shadow_pbft_actual = 2 * n * (n - 1)
         shadow_hotstuff_actual = 8 * (n - 1)
         shadow_multilayer_actual = (2 * k * (k - 1)) + (k * 2 * group_size * (group_size - 1))
@@ -559,11 +550,11 @@ class ConsensusService:
         theoretical_pbft = 2 * n * n
         theoretical_hotstuff = 4 * n
         theoretical_multilayer = 2 * k * k + 2 * n * n // k
-        # Chained HotStuff（单层稳态，每确认一个区块的消息数）：2N
+        # Chained HotStuff: messages per confirmed block in steady state = 2N
         theoretical_chained_hotstuff = 2 * n
 
         hotstuff_double_actual = actual_messages
-        # 比例计算时除数至少为 1，避免除零或无穷大
+        # Guard against division by zero; floor divisor at 1
         divisor = max(1, actual_messages)
         optimization_vs_pbft_pure = theoretical_pbft / divisor
         optimization_vs_hotstuff_pure = theoretical_hotstuff / divisor
@@ -594,7 +585,7 @@ class ConsensusService:
             "chained_hotstuff": {
                 "name": "Chained HotStuff",
                 "theoretical": theoretical_chained_hotstuff,
-                # 这里仅做理论 Shadow 演示，实际计数未单独统计
+                # Theoretical shadow only — actual count not tracked separately
                 "actual": theoretical_chained_hotstuff,
                 "complexity": "O(N)",
             },

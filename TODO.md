@@ -37,3 +37,36 @@ Status: `[ ]` open · `[x]` done · `[-]` deferred
 - [ ] Expose `max_round_wait_seconds` as a simulation request parameter (currently hard-coded 3.0 s; too short for large N)
 - [ ] Add a `/api/sessions/{id}/reset` endpoint for restarting a round without deleting the session
 - [-] Frontend Vue component comment translation (low priority; higher change risk)
+
+## Algorithm Improvements — Grouping Strategy
+
+Root cause of oscillatory reliability: `K = round(√N)` is a discrete staircase function.
+Each jump in K causes a sawtooth in group size `g = N/K`, and the BFT quorum
+`q_local = 2·⌊(g−1)/3⌋+1` peaks (hardest) whenever `g ≡ 1 (mod 3)` (i.e. g = 4, 7, 10, 13 …),
+producing reliability valleys as N grows — the "Three Gears" mechanism.
+
+- [ ] **Direction 1 — Fixed g_target**: replace `K = round(√N)` with `K = round(N / g_target)`
+  where `g_target ∈ {6, 9}` (multiples of 3 ⇒ never hit g≡1 mod 3 worst case).
+  Simple one-line change; eliminates most of the oscillation.
+
+- [ ] **Direction 2 — Adaptive K**: scan candidate K values and select the one that
+  minimises the quorum-difficulty ratio `q_local / g`:
+  ```python
+  def choose_K(N):
+      best_K, best_ratio = 4, 1.0
+      for K in range(4, int(N**0.5) * 2):
+          g = N / K
+          if g < 3: break
+          f_local = int((g - 1) // 3)
+          q_local = 2 * f_local + 1
+          ratio = q_local / g
+          if ratio < best_ratio:
+              best_ratio = ratio
+              best_K = K
+      return best_K
+  ```
+  Most robust option; always picks the locally easiest quorum configuration.
+
+- [ ] **Direction 3 — Align g away from 3m+1**: after computing `K = round(√N)`, nudge K
+  up or down by 1 if `round(N/K) % 3 == 1`, to avoid the worst-case quorum ratio
+  without changing the overall √N scaling strategy.

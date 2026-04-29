@@ -82,14 +82,19 @@ d:/block_chain
 │   ├── consensus_service.py  # 共识服务层
 │   ├── robot_agent.py        # 机器人节点行为
 │   └── blockchain_sim.db     # SQLite 持久化文件
+├── scripts/                  # 离线分析脚本（绘图、建模、标定）
+├── thesis/                   # BEng FYP LaTeX 报告
+│   ├── main.tex
+│   ├── mylit.bib
+│   └── figures/
+├── docs/history/             # 历史变更记录存档
 ├── start.bat / start.sh
-├── test_*.py
 └── README.md
 ```
 
 ## 可选：离线分析脚本
 
-仓库根目录保留了若干离线分析脚本（如 `final_analysis.py`、`plot_results.py`、`mathematical_model.py` 等），可用于实验数据后处理与绘图。  
+`scripts/` 目录包含实验数据后处理与绘图工具（`final_analysis.py`、`plot_results.py`、`mathematical_model.py` 等），以及模型标定脚本（`calibrate_model.py`）。  
 这部分是辅助研究工具，不是在线系统运行的必需依赖。
 
 ## 相关文档

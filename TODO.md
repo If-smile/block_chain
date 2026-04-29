@@ -22,7 +22,8 @@ Status: `[ ]` open · `[x]` done · `[-]` deferred
 
 - [x] Archive historical changelog docs to `docs/history/`
 - [x] Organise thesis files into `thesis/` folder
-- [ ] Move test scripts into a `tests/` directory
+- [x] Remove obsolete one-off test scripts from root
+- [x] Move analysis/experiment scripts into `scripts/` directory
 - [ ] Pin dependency versions in `backend/requirements.txt`
 
 ## Thesis / Report

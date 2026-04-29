@@ -1,9 +1,10 @@
 """
-Socket.IO 事件处理和业务逻辑模块
+Socket.IO event handlers and business-logic module.
 
-此模块包含所有 Socket.IO 事件处理与消息处理；机器人/代理的自动化行为
-已抽离至 robot_agent 模块，通过回调与本模块协作。
-从 main.py 重构而来，实现模块化设计。
+Contains all Socket.IO event handlers and message-routing logic.
+Automated robot/agent behaviour has been extracted into robot_agent.py
+and is wired back via callbacks.  Refactored out of main.py for
+modularity.
 """
 
 from typing import Dict, Any, Optional, List
@@ -12,10 +13,10 @@ import random
 import asyncio
 from datetime import datetime
 
-# 持久化模块
+# Persistence module
 import database
 
-# 导入全局状态和 Socket.IO 服务器（含网络统计与传达概率）
+# Global state and Socket.IO server (includes network stats and delivery probability)
 from state import (
     sio,
     sessions,
@@ -26,7 +27,7 @@ from state import (
     count_message_sent,
 )
 
-# 导入共识算法函数 / 纯逻辑服务
+# Consensus algorithm functions / pure-logic service layer
 from consensus_engine import (
     get_quorum_threshold,
     get_local_quorum_threshold,
@@ -52,36 +53,36 @@ from robot_agent import (
     handle_robot_commit,
 )
 
-# 导入拓扑管理函数
+# Topology management
 from topology_manager import (
     get_current_leader,
     get_topology_info,
     is_connection_allowed
 )
 
-# 导入数据模型
+# Data models
 from models import SessionConfig, SessionInfo
 
-# Service Layer 实例
+# Service-layer singletons
 consensus_service = ConsensusService()
 robot_agent = RobotAgent()
 
 
-# ==================== 会话管理 ====================
+# ==================== Session management ====================
 
 def create_session(config: SessionConfig, is_simulation: bool = False) -> SessionInfo:
-    """创建新的共识会话"""
+    """Create a new consensus session and kick off robot nodes."""
     session_id = str(uuid.uuid4())
-    
-    print(f"创建会话 - 原始配置:", config.dict())
-    print(f"提议内容检查 - 创建时:", {
+
+    print(f"create_session - raw config:", config.dict())
+    print(f"proposal content check at creation:", {
         'proposalContent': config.proposalContent,
         'hasProposalContent': config.proposalContent and config.proposalContent.strip(),
         'proposalValue': config.proposalValue
     })
     
     base_config = config.dict()
-    # 仿真模式下直接在配置中打上标记，后续逻辑可据此关闭持久化、缩短超时等
+    # Tag the config so downstream logic can skip persistence and shorten timeouts
     if is_simulation:
         base_config["is_simulation"] = True
 
@@ -90,44 +91,44 @@ def create_session(config: SessionConfig, is_simulation: bool = False) -> Sessio
         "status": "waiting",
         "phase": "waiting",
         "phase_step": 0,
-        "current_view": 0,   # 当前视图编号（HotStuff，View 即时钟，核心逻辑使用此字段）
-        "current_round": 1,  # 当前轮次编号（用于消息标记和历史回放，从1开始）
-        "start_view_of_round": 0,  # 当前轮次的起始视图（用于统计 View Change 次数）
-        "leader_id": 0,      # 当前视图的Leader ID
+        "current_view": 0,          # HotStuff view counter (the protocol clock)
+        "current_round": 1,         # Round number for message tagging and history replay (1-based)
+        "start_view_of_round": 0,   # View at which the current round started (used to count view-changes)
+        "leader_id": 0,             # Leader ID for the current view
         "connected_nodes": [],
-        "robot_nodes": [],  # 机器人节点列表
-        "human_nodes": [],  # 人类节点列表（拜占庭节点）
-        "robot_node_states": {},  # 机器人节点的状态（记录收到的消息）
-        "timeout_task": None,  # 超时任务
+        "robot_nodes": [],          # Automated robot node IDs
+        "human_nodes": [],          # Human (potentially Byzantine) node IDs
+        "robot_node_states": {},    # Per-robot state (tracks received messages)
+        "timeout_task": None,       # asyncio Task handle for the view timeout
         "messages": {
             "pre_prepare": [],
             "prepare": [],
             "commit": [],
             "vote": [],
             "qc": [],
-            "new_view": []  # NEW-VIEW 消息
+            "new_view": []          # NEW-VIEW messages
         },
-        "node_states": {},  # 每个节点的持久化状态 {node_id: {lockedQC, prepareQC, currentView}}
-        "pending_votes": {},  # {(view, phase, value): set(voter_ids)}
-        "pending_new_views": {},  # {(view): {node_id: new_view_msg}} Leader 收集的 NEW-VIEW 消息
-        "message_buffer": {},  # {view: [messages]} 未来视图的消息缓冲池（扁平结构）
-        "network_stats": {    # 通信复杂度统计
-            "total_messages_sent": 0,  # 本轮产生的总网络包数量
-            "phases_count": 0          # 经历的阶段数（HotStuff阶段流转次数）
+        "node_states": {},          # Per-node persistent state {node_id: {lockedQC, prepareQC, currentView}}
+        "pending_votes": {},        # {(view, phase, value): set(voter_ids)}
+        "pending_new_views": {},    # {view: {node_id: new_view_msg}} NEW-VIEW messages collected by the leader
+        "message_buffer": {},       # {view: [messages]} future-view message buffer (flat structure)
+        "network_stats": {          # Communication-complexity counters
+            "total_messages_sent": 0,   # Total network packets generated this round
+            "phases_count": 0           # Number of HotStuff phase transitions
         },
         "consensus_result": None,
-        "consensus_history": [],  # 共识历史记录
+        "consensus_history": [],    # Per-round consensus snapshots
         "created_at": datetime.now().isoformat()
     }
     
-    # 初始化每个节点的持久化状态（HotStuff Safety 要求）
+    # Initialise per-node persistent state (required by HotStuff Safety)
     n = config.nodeCount
     for node_id in range(n):
         session["node_states"][node_id] = {
-            "lockedQC": None,      # 最高锁定的 QC (用于 SafeNode 检查)
-            "prepareQC": None,     # 最高准备的 QC (用于 New-View 选择 HighQC)
-            "currentView": 0,      # 节点当前视图（用于消息验证）
-            "highQC": None         # 用于 New-View 的最高 QC
+            "lockedQC": None,      # Highest locked QC (used in SafeNode check)
+            "prepareQC": None,     # Highest prepared QC (used for HighQC selection in New-View)
+            "currentView": 0,      # Node's current view (used for message validation)
+            "highQC": None         # Highest QC seen so far (sent in NEW-VIEW messages)
         }
     session["leader_id"] = session["current_view"] % config.nodeCount
     
@@ -135,14 +136,15 @@ def create_session(config: SessionConfig, is_simulation: bool = False) -> Sessio
     connected_nodes[session_id] = []
     node_sockets[session_id] = {}
 
-    # 将初始会话状态持久化到 SQLite（仿真模式下跳过以避免磁盘 I/O）
+    # Persist initial session state to SQLite (skipped in simulation mode to avoid disk I/O)
     if not is_simulation:
         try:
             database.upsert_session(session_id, session)
         except Exception as e:
-            print(f"[database] 保存初始会话 {session_id} 失败: {e}")
-    
-    # 创建机器人节点并立即开始共识（start_hotstuff_process 由本模块定义，注入为回调）
+            print(f"[database] Failed to save initial session {session_id}: {e}")
+
+    # Spawn robot nodes and immediately begin consensus
+    # (start_hotstuff_process is defined in this module and injected as a callback)
     asyncio.create_task(
         create_robot_nodes_and_start(session_id, config.robotNodes, start_hotstuff_process_cb=start_hotstuff_process)
     )
@@ -166,14 +168,14 @@ def create_session(config: SessionConfig, is_simulation: bool = False) -> Sessio
     }
 
 
-# ==================== Socket.IO 事件处理 ====================
+# ==================== Socket.IO event handlers ====================
 
 @sio.event
 async def connect(sid, environ, auth):
-    """客户端连接事件"""
-    print(f"客户端连接: {sid}")
-    
-    # 从查询参数获取会话和节点信息
+    """Handle client connection."""
+    print(f"Client connected: {sid}")
+
+    # Extract session and node information from query-string parameters
     query = environ.get('QUERY_STRING', '')
     params = dict(item.split('=') for item in query.split('&') if '=' in item)
     
@@ -181,38 +183,38 @@ async def connect(sid, environ, auth):
     node_id = int(params.get('nodeId', 0))
     
     if session_id and session_id in sessions:
-        # 存储节点连接信息
+        # Store node ↔ socket-ID mapping
         if session_id not in node_sockets:
             node_sockets[session_id] = {}
         node_sockets[session_id][node_id] = sid
-        
-        # 添加到已连接节点列表
+
+        # Add to the connected-nodes list
         if session_id not in connected_nodes:
             connected_nodes[session_id] = []
         if node_id not in connected_nodes[session_id]:
             connected_nodes[session_id].append(node_id)
-            
-            # 标记人类节点为拜占庭节点
+
+            # Human nodes are treated as (potentially) Byzantine
             session = sessions[session_id]
             if node_id not in session["robot_nodes"]:
                 session["human_nodes"].append(node_id)
-                print(f"人类节点 {node_id} 已连接（拜占庭节点）")
+                print(f"Human node {node_id} connected (Byzantine-capable)")
             else:
-                print(f"机器人节点 {node_id} 已重新连接")
-        
+                print(f"Robot node {node_id} reconnected")
+
         session = sessions[session_id]
-        
-        # 发送会话配置
+
+        # Send session configuration to the joining node
         config = session["config"]
-        print(f"发送会话配置给节点 {node_id}:", config)
-        print(f"提议内容检查 - 后端:", {
+        print(f"Sending session config to node {node_id}:", config)
+        print(f"Proposal content check (backend):", {
             'proposalContent': config.get('proposalContent'),
             'hasProposalContent': config.get('proposalContent') and config.get('proposalContent').strip(),
             'proposalValue': config.get('proposalValue')
         })
         await sio.emit('session_config', config, room=sid)
         
-        # 发送当前共识状态，确保新连接的节点能同步状态
+        # Sync current consensus state so the newly connected node is up to date
         current_view = session.get("current_view", 0)
         current_phase = session.get("phase", "prepare")
         current_step = session.get("phase_step", 0)
@@ -225,44 +227,44 @@ async def connect(sid, environ, auth):
             "view": current_view
         }, room=sid)
         
-        print(f"节点 {node_id} 同步状态: View={current_view}, Phase={current_phase}, Step={current_step}, Leader={current_leader}")
-        
-        # 人类节点进入时，不参加当前轮次的共识
-        # 只发送会话配置，不发送当前轮次信息和历史消息
-        print(f"人类节点 {node_id} 进入，等待下一轮共识开始")
-        
-        # 将节点加入会话房间
+        print(f"Node {node_id} synced state: View={current_view}, Phase={current_phase}, Step={current_step}, Leader={current_leader}")
+
+        # Human nodes joining mid-round do not participate in the current round;
+        # they only receive the session config and wait for the next round.
+        print(f"Human node {node_id} joined — waiting for next consensus round")
+
+        # Add node to the session's Socket.IO room
         await sio.enter_room(sid, session_id)
-        
-        # 广播连接状态
+
+        # Broadcast updated connected-nodes list
         await sio.emit('connected_nodes', connected_nodes[session_id], room=session_id)
-        
-        print(f"节点 {node_id} 加入会话 {session_id}")
-        
-        # 检查是否可以开始共识
+
+        print(f"Node {node_id} joined session {session_id}")
+
+        # Start consensus if the required number of nodes is now connected
         await check_and_start_consensus(session_id)
 
 @sio.event
 async def disconnect(sid):
-    """客户端断开连接事件"""
-    print(f"客户端断开连接: {sid}")
-    
-    # 查找并移除节点连接
+    """Handle client disconnection."""
+    print(f"Client disconnected: {sid}")
+
+    # Find and remove the node's connection record
     for session_id, nodes in node_sockets.items():
         for node_id, node_sid in nodes.items():
             if node_sid == sid:
                 del nodes[node_id]
                 if node_id in connected_nodes.get(session_id, []):
                     connected_nodes[session_id].remove(node_id)
-                
-                # 广播更新
+
+                # Broadcast updated connected-nodes list
                 await sio.emit('connected_nodes', connected_nodes[session_id], room=session_id)
-                print(f"节点 {node_id} 离开会话 {session_id}")
+                print(f"Node {node_id} left session {session_id}")
                 break
 
 @sio.event
 async def send_prepare(sid, data):
-    """处理准备消息（双层 HotStuff：根据角色发送给上级）"""
+    """Handle a Prepare vote (double-layer HotStuff: route to parent based on role)."""
     session_id = data.get('sessionId')
     node_id = data.get('nodeId')
     value = data.get('value')
@@ -273,18 +275,18 @@ async def send_prepare(sid, data):
     
     current_view = session["current_view"]
     
-    # 获取节点拓扑信息，确定投票目标
+    # Determine vote target from topology (parent node in the two-layer tree)
     node_info = get_topology_info(session, node_id, current_view)
     target_id = node_info['parent_id']
-    
-    # 如果是 Root (Global Leader)，不需要给自己投票
+
+    # Root (Global Leader) does not vote to itself
     if node_info['role'] == 'root':
-        print(f"[双层 HotStuff] Global Leader {node_id} 不需要给自己投票")
+        print(f"[Double-Layer HotStuff] Global Leader {node_id} skips self-vote")
         return
-    
+
     target_sid = node_sockets.get(session_id, {}).get(target_id)
-    
-    # 构造投票（VOTE）消息，发送给上级（Group Leader 或 Global Leader）
+
+    # Build the VOTE message addressed to the parent node
     current_round = session.get("current_round", 1)
     vote_message = {
         "from": node_id,
@@ -293,35 +295,35 @@ async def send_prepare(sid, data):
         "value": value,
         "phase": "prepare",
         "view": current_view,
-        "round": current_round,  # 使用当前轮次标记消息
+        "round": current_round,     # Tag with current round for history filtering
         "qc": data.get("qc"),
         "timestamp": datetime.now().isoformat(),
         "tampered": False,
         "byzantine": data.get("byzantine", False)
     }
-    
+
     session["messages"]["vote"].append(vote_message)
-    
-    # 单播给上级（不广播）——无论目标是否在线，都计入一次消息发送
+
+    # Unicast to parent — count as one sent message regardless of online status
     count_message_sent(session_id, is_broadcast=False)
     delivered = should_deliver_message(session_id)
     if target_sid:
         if delivered:
             await sio.emit('message_received', vote_message, room=target_sid)
             role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
-            print(f"[双层 HotStuff] 节点 {node_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(prepare)")
+            print(f"[Double-Layer HotStuff] Node {node_id} ({node_info['role']}) → {role_name} {target_id}: VOTE(prepare)")
         else:
-            print(f"[网络模拟] 节点 {node_id} 的 VOTE(prepare) 消息被丢弃 (目标: {target_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
+            print(f"[Network sim] Node {node_id} VOTE(prepare) dropped (target: {target_id}, delivery rate: {session['config'].get('messageDeliveryRate', 100)}%)")
     else:
-        print(f"[双层 HotStuff] 目标 {target_id} 不在线，缓存 VOTE")
-    
-    # 只有在消息被视为成功送达时，才在后端处理投票累积
+        print(f"[Double-Layer HotStuff] Target {target_id} offline — VOTE buffered")
+
+    # Only accumulate the vote on the backend when the message is considered delivered
     if delivered:
         await handle_vote(session_id, vote_message)
 
 @sio.event
 async def send_commit(sid, data):
-    """处理提交消息（双层 HotStuff：根据角色发送给上级）"""
+    """Handle a Commit vote (double-layer HotStuff: route to parent based on role)."""
     session_id = data.get('sessionId')
     node_id = data.get('nodeId')
     value = data.get('value')
@@ -332,18 +334,18 @@ async def send_commit(sid, data):
     
     current_view = session["current_view"]
     
-    # 获取节点拓扑信息，确定投票目标
+    # Determine vote target from topology
     node_info = get_topology_info(session, node_id, current_view)
     target_id = node_info['parent_id']
-    
-    # 如果是 Root (Global Leader)，不需要给自己投票
+
+    # Root (Global Leader) does not vote to itself
     if node_info['role'] == 'root':
-        print(f"[双层 HotStuff] Global Leader {node_id} 不需要给自己投票")
+        print(f"[Double-Layer HotStuff] Global Leader {node_id} skips self-vote")
         return
-    
+
     target_sid = node_sockets.get(session_id, {}).get(target_id)
-    
-    # 构造投票（VOTE）消息，发送给上级（Group Leader 或 Global Leader）
+
+    # Build the VOTE message
     current_round = session.get("current_round", 1)
     vote_message = {
         "from": node_id,
@@ -352,35 +354,35 @@ async def send_commit(sid, data):
         "value": value,
         "phase": "commit",
         "view": current_view,
-        "round": current_round,  # 使用当前轮次标记消息
+        "round": current_round,     # Tag with current round
         "qc": data.get("qc"),
         "timestamp": datetime.now().isoformat(),
         "tampered": False,
         "byzantine": data.get("byzantine", False)
     }
-    
+
     session["messages"]["vote"].append(vote_message)
-    
-    # 单播给上级（不广播）——无论目标是否在线，都计入一次消息发送
+
+    # Unicast to parent — always count as one sent message
     count_message_sent(session_id, is_broadcast=False)
     delivered = should_deliver_message(session_id)
     if target_sid:
         if delivered:
             await sio.emit('message_received', vote_message, room=target_sid)
             role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
-            print(f"[双层 HotStuff] 节点 {node_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE(commit)")
+            print(f"[Double-Layer HotStuff] Node {node_id} ({node_info['role']}) → {role_name} {target_id}: VOTE(commit)")
         else:
-            print(f"[网络模拟] 节点 {node_id} 的 VOTE(commit) 消息被丢弃 (目标: {target_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
+            print(f"[Network sim] Node {node_id} VOTE(commit) dropped (target: {target_id}, delivery rate: {session['config'].get('messageDeliveryRate', 100)}%)")
     else:
-        print(f"[双层 HotStuff] 目标 {target_id} 不在线，缓存 VOTE")
-    
-    # 只有在消息被视为成功送达时，才在后端处理投票累积
+        print(f"[Double-Layer HotStuff] Target {target_id} offline — VOTE buffered")
+
+    # Only accumulate on the backend when delivered
     if delivered:
         await handle_vote(session_id, vote_message)
 
 @sio.event
 async def send_message(sid, data):
-    """处理通用消息（已移除自定义消息功能）"""
+    """Handle a generic message (custom-message feature has been removed)."""
     session_id = data.get('sessionId')
     node_id = data.get('nodeId')
     message_type = data.get('type')
@@ -391,71 +393,71 @@ async def send_message(sid, data):
     if not session:
         return
     
-    # 记录消息
+    # Record the message
     message = {
         "from": node_id,
         "to": target,
         "type": message_type,
         "value": value,
         "phase": session.get("phase", "waiting"),
-        "view": session.get("current_view", 0),  # HotStuff视图（核心逻辑使用）
-        "round": session.get("current_round", 1),  # 使用当前轮次标记消息（用于历史过滤和前端展示）
-        "qc": data.get("qc"),                    # Quorum Certificate
+        "view": session.get("current_view", 0),    # HotStuff view (used by core logic)
+        "round": session.get("current_round", 1),  # Round tag for history filtering and UI
+        "qc": data.get("qc"),                      # Quorum Certificate (if any)
         "timestamp": datetime.now().isoformat(),
         "tampered": False
     }
-    
-    # 根据消息类型存储到相应的消息列表
+
+    # Store in the appropriate message bucket
     if message_type == "prepare":
         session["messages"]["prepare"].append(message)
     elif message_type == "commit":
         session["messages"]["commit"].append(message)
     elif message_type == "vote":
-        # HotStuff 投票消息存入 vote 列表
+        # HotStuff vote messages go into the vote list
         session["messages"]["vote"].append(message)
     else:
-        # 其他类型消息
+        # Catch-all for other message types
         if "other" not in session["messages"]:
             session["messages"]["other"] = []
         session["messages"]["other"].append(message)
-    
-    # 根据消息类型决定发送范围（双层 HotStuff：投票根据角色发送给上级）
+
+    # Route by message type (double-layer HotStuff: votes go to the parent node)
     if message_type == "vote":
         current_view = session.get("current_view", 0)
-        
-        # 获取节点拓扑信息，确定投票目标（双层结构）
+
+        # Determine target from topology
         node_info = get_topology_info(session, node_id, current_view)
         target_id = node_info['parent_id']
-        
-        # 如果是 Root (Global Leader)，不需要给自己投票
+
+        # Root (Global Leader) does not vote to itself
         if node_info['role'] == 'root':
-            print(f"[双层 HotStuff] Global Leader {node_id} 不需要给自己投票")
+            print(f"[Double-Layer HotStuff] Global Leader {node_id} skips self-vote")
             return
-        
-        # 更新消息的目标
+
+        # Update message destination
         message["to"] = target_id
-        
+
         target_sid = node_sockets.get(session_id, {}).get(target_id)
-        # 单播给上级（不广播）——无论目标是否在线，都计入一次消息发送
+        # Unicast to parent — always count as one sent message
         count_message_sent(session_id, is_broadcast=False)
         if target_sid:
             await sio.emit('message_received', message, room=target_sid)
             role_name = "Group Leader" if node_info['role'] == 'member' else "Global Leader"
-            print(f"[双层 HotStuff] 节点 {node_id} ({node_info['role']}) 向 {role_name} {target_id} 发送 VOTE")
+            print(f"[Double-Layer HotStuff] Node {node_id} ({node_info['role']}) → {role_name} {target_id}: VOTE")
         else:
-            print(f"[双层 HotStuff] 目标 {target_id} 不在线，缓存 VOTE")
+            print(f"[Double-Layer HotStuff] Target {target_id} offline — VOTE buffered")
         await handle_vote(session_id, message)
     else:
-        # 其他消息默认广播给所有节点
+        # Non-vote messages: broadcast to all nodes
         if should_deliver_message(session_id):
             await sio.emit('message_received', message, room=session_id)
-            print(f"节点 {node_id} 的消息已发送 (传达概率: {session['config'].get('messageDeliveryRate', 100)}%)")
+            print(f"Node {node_id} message sent (delivery rate: {session['config'].get('messageDeliveryRate', 100)}%)")
         else:
-            print(f"节点 {node_id} 的消息被丢弃 (传达概率: {session['config'].get('messageDeliveryRate', 100)}%)")
+            print(f"Node {node_id} message dropped (delivery rate: {session['config'].get('messageDeliveryRate', 100)}%)")
 
 @sio.event
 async def choose_normal_consensus(sid, data):
-    """处理人类节点选择正常共识"""
+    """Handle a human node choosing to participate honestly (delegates to robot mode)."""
     session_id = data.get('sessionId')
     node_id = data.get('nodeId')
     
@@ -463,18 +465,17 @@ async def choose_normal_consensus(sid, data):
     if not session:
         return
     
-    # 将此人类节点转为机器人代理模式
-    print(f"人类节点 {node_id} 选择正常共识，切换为机器人代理模式")
-    
-    # 从人类节点列表中移除，加入机器人节点列表（本轮）
+    # Switch this human node to robot-agent mode
+    print(f"Human node {node_id} chose normal consensus — switching to robot-agent mode")
+
+    # Remove from human list and add to robot list for this round
     if node_id in session["human_nodes"]:
         session["human_nodes"].remove(node_id)
-    
-    # 临时将此节点加入机器人节点列表
+
     if node_id not in session["robot_nodes"]:
         session["robot_nodes"].append(node_id)
-        
-        # 初始化机器人节点状态
+
+        # Initialise robot state for this node
         session["robot_node_states"][node_id] = {
             "received_pre_prepare": True,
             "received_prepare_count": len([m for m in session["messages"]["prepare"] if m["from"] != node_id]),
@@ -483,7 +484,8 @@ async def choose_normal_consensus(sid, data):
             "sent_commit": False
         }
     
-    # 根据当前阶段自动发送消息（注入 handle_vote 供 robot_agent 回调）
+    # Automatically send the appropriate message for the current phase
+    # (handle_vote is injected as a callback for robot_agent)
     config = session["config"]
 
     async def _prep_cb(s, r, v):
@@ -505,20 +507,19 @@ async def choose_normal_consensus(sid, data):
 
 @sio.event
 async def choose_byzantine_attack(sid, data):
-    """处理人类节点选择拜占庭攻击"""
+    """Handle a human node choosing Byzantine (malicious) behaviour."""
     session_id = data.get('sessionId')
     node_id = data.get('nodeId')
-    
-    print(f"人类节点 {node_id} 选择拜占庭攻击模式")
-    # 不需要特殊处理，人类节点保持在human_nodes列表中
+
+    print(f"Human node {node_id} chose Byzantine attack mode")
+    # No extra action needed — the node stays in human_nodes and behaves adversarially
 
 @sio.event
 async def ping(sid, data):
-    """处理Ping消息"""
+    """Respond to a Ping message with a Pong."""
     session_id = data.get('sessionId')
     node_id = data.get('nodeId')
-    
-    # 发送Pong响应
+
     pong_message = {
         "from": "server",
         "to": node_id,
@@ -527,28 +528,28 @@ async def ping(sid, data):
         "phase": "ping",
         "timestamp": datetime.now().isoformat(),
         "tampered": False,
-        "customContent": f"服务器响应节点{node_id}的Ping"
+        "customContent": f"Server Pong to node {node_id}"
     }
-    
+
     await sio.emit('message_received', pong_message, room=session_id)
-    print(f"节点 {node_id} 发送Ping，服务器响应Pong")
+    print(f"Node {node_id} pinged — server responded with Pong")
 
 
-# ==================== 消息处理函数 ====================
+# ==================== Message-processing functions ====================
 
 async def handle_proposal_message(session_id: str, proposal_msg: Dict[str, Any], node_id: int) -> bool:
     """
-    处理 Replica 节点收到的 Proposal 消息（HotStuff PRE-PREPARE）
-    
-    执行 SafeNode 谓词检查，如果通过则发送 Prepare Vote
-    
-    参数:
-        session_id: 会话ID
-        proposal_msg: Proposal 消息
-        node_id: 接收消息的节点ID
-    
-    返回:
-        bool: 如果通过 SafeNode 检查并发送了 Vote 返回 True，否则返回 False
+    Process a Proposal message received by a replica (HotStuff PRE-PREPARE step).
+
+    Runs the SafeNode predicate check; if it passes, triggers a Prepare vote.
+
+    Args:
+        session_id:   Session identifier.
+        proposal_msg: The incoming Proposal message dict.
+        node_id:      ID of the replica receiving the proposal.
+
+    Returns:
+        True if SafeNode passed and a vote was sent, False otherwise.
     """
     session = get_session(session_id)
     if not session:
@@ -557,19 +558,19 @@ async def handle_proposal_message(session_id: str, proposal_msg: Dict[str, Any],
     result = consensus_service.handle_proposal(session, proposal_msg, node_id)
 
     if not result["accepted"]:
-        # 缓冲或拒绝，记录原因
+        # Buffered or rejected — log the reason
         reason = result.get("reason")
         if result.get("buffered"):
-            print(f"节点 {node_id}: Proposal 被缓冲 - {reason}")
+            print(f"Node {node_id}: Proposal buffered — {reason}")
         else:
-            print(f"节点 {node_id}: Proposal 被拒绝 - {reason}")
+            print(f"Node {node_id}: Proposal rejected — {reason}")
         return False
 
     proposal_view = proposal_msg.get("view", -1)
     proposal_value = proposal_msg.get("value")
-    print(f"节点 {node_id}: SafeNode 检查通过，发送 Vote（View {proposal_view}, Value {proposal_value}）")
+    print(f"Node {node_id}: SafeNode passed — sending Vote (view={proposal_view}, value={proposal_value})")
 
-    # 仅对机器人节点自动发送投票，人类节点仍由前端触发
+    # Robot nodes vote automatically; human nodes are triggered by the frontend
     if node_id in session.get("robot_nodes", []):
         await handle_robot_prepare(session_id, node_id, proposal_value, handle_vote_cb=handle_vote)
         return True
@@ -578,15 +579,15 @@ async def handle_proposal_message(session_id: str, proposal_msg: Dict[str, Any],
 
 async def handle_qc_message(session_id: str, qc_msg: Dict[str, Any], node_id: int):
     """
-    处理节点收到的 QC 消息（HotStuff 阶段推进）
-    
-    当收到 Commit 阶段的 QC 时，更新节点的 lockedQC
-    收到任何阶段的 QC 时，更新节点的 prepareQC（用于 New-View）
-    
-    参数:
-        session_id: 会话ID
-        qc_msg: QC 消息
-        node_id: 接收消息的节点ID
+    Process a QC message received by a node (HotStuff phase advancement).
+
+    Updates the node's lockedQC when a Commit-phase QC is received.
+    Updates prepareQC (used for New-View HighQC selection) on any QC.
+
+    Args:
+        session_id: Session identifier.
+        qc_msg:     The incoming QC message dict.
+        node_id:    ID of the node receiving the QC.
     """
     session = get_session(session_id)
     if not session:
@@ -598,18 +599,21 @@ async def handle_qc_message(session_id: str, qc_msg: Dict[str, Any], node_id: in
     qc_phase = qc.get("phase", "")
     qc_view = qc.get("view", -1)
     if qc_phase == "commit":
-        print(f"节点 {node_id}: 收到 Commit QC（View {qc_view}），已更新 lockedQC")
+        print(f"Node {node_id}: Commit QC received (view={qc_view}) — lockedQC updated")
 
 async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
     """
-    双层 HotStuff 投票处理：支持分层投票聚合
-    
-    流程:
-    1. Member -> Group Leader: 普通节点投票给组内 Leader
-    2. Group Leader -> Global Leader: 组内达到阈值后，Group Leader 发送 GroupVote（权重票）
-    3. Global Leader: 收集 GroupVote，检查总权重阈值，生成最终 QC
-    
-    支持消息缓冲：如果 view > current_view，消息会被缓冲，等视图切换后再处理
+    Double-layer HotStuff vote handler: supports hierarchical vote aggregation.
+
+    Flow:
+    1. Member → Group Leader : regular nodes vote to their local Group Leader
+    2. Group Leader → Global Leader : once the local quorum is reached, the Group
+       Leader sends a weighted GroupVote to the Global Leader
+    3. Global Leader : collects GroupVotes, checks the global weight threshold,
+       and generates the final QC
+
+    Message buffering: if vote.view > current_view the message is buffered and
+    re-processed after the view-change completes.
     """
     session = get_session(session_id)
     if not session:
@@ -623,13 +627,13 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
     status = result.get("status")
 
     if status == "buffered":
-        print(f"投票视图 {view} > 当前视图 {session.get('current_view', 0)}，缓冲消息")
+        print(f"Vote view {view} > current view {session.get('current_view', 0)} — buffered")
         return
     if status == "ignored":
-        print(f"忽略旧投票或非法角色投票: view={view}, phase={phase}")
+        print(f"Ignored stale or invalid-role vote: view={view}, phase={phase}")
         return
 
-    # 如果 Service 生成了 GroupVote，需要网络层路由到 Global Leader
+    # If the Service produced a GroupVote, route it to the Global Leader at the network layer
     group_vote = result.get("group_vote")
     if group_vote:
         global_leader_id = group_vote["to"]
@@ -639,14 +643,14 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
             if should_deliver_message(session_id):
                 await sio.emit("message_received", group_vote, room=global_leader_sid)
                 print(
-                    f"[双层 HotStuff] Group Leader {group_vote['from']} 向 Global Leader {global_leader_id} 发送 GroupVote (权重={group_vote.get('weight')})"
+                    f"[Double-Layer HotStuff] Group Leader {group_vote['from']} → Global Leader {global_leader_id}: GroupVote (weight={group_vote.get('weight')})"
                 )
             else:
                 print(
-                    f"[网络模拟] Group Leader {group_vote['from']} 的 GroupVote 消息被丢弃 (目标: Global Leader {global_leader_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)"
+                    f"[Network sim] Group Leader {group_vote['from']} GroupVote dropped (target: Global Leader {global_leader_id}, delivery rate: {session['config'].get('messageDeliveryRate', 100)}%)"
                 )
 
-    # 如果生成了 QC，则按双层拓扑进行广播，并驱动后续阶段
+    # If a QC was produced, broadcast it via the two-layer topology and advance the phase
     qc_message = result.get("qc_message")
     routing = result.get("routing")
     if qc_message and routing:
@@ -666,7 +670,7 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
                     await sio.emit("message_received", qc_message, room=gl_sid)
                 else:
                     print(
-                        f"[网络模拟] QC 消息被丢弃 (目标: Group Leader {gl_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)"
+                        f"[Network sim] QC dropped (target: Group Leader {gl_id}, delivery rate: {session['config'].get('messageDeliveryRate', 100)}%)"
                     )
 
         # Group Leaders -> Members
@@ -690,10 +694,10 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
                         await sio.emit("message_received", forward_message, room=member_sid)
                     else:
                         print(
-                            f"[网络模拟] QC 转发消息被丢弃 (目标: Member {member_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)"
+                            f"[Network sim] QC forward dropped (target: Member {member_id}, delivery rate: {session['config'].get('messageDeliveryRate', 100)}%)"
                         )
 
-        # 也发送给所有节点（用于前端展示）
+        # Also broadcast to the whole room so the frontend can display it
         await sio.emit("message_received", qc_message, room=session_id)
 
         await sio.emit(
@@ -708,16 +712,16 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
         )
 
         print(
-            f"[双层 HotStuff] Global Leader {global_leader_id} 生成 {phase} QC 并进入 {qc_message.get('next_phase')} 阶段（View {view}）"
+            f"[Double-Layer HotStuff] Global Leader {global_leader_id} generated {phase} QC → entering {qc_message.get('next_phase')} phase (view={view})"
         )
         print(
-            f"[双层 HotStuff] QC 通过分层广播：Global Leader -> {len(group_leaders)} Group Leaders -> Members"
+            f"[Double-Layer HotStuff] QC propagated: Global Leader → {len(group_leaders)} Group Leaders → Members"
         )
 
-        # 所有节点根据 QC 更新本地状态
+        # All nodes update their local QC state
         consensus_service.handle_qc_for_all_nodes(session, qc_message)
 
-        # HotStuff 多阶段自动推进
+        # Drive the next HotStuff phase automatically
         next_phase = qc_message.get("next_phase")
         if next_phase == "decide":
             await finalize_consensus(
@@ -736,13 +740,13 @@ async def handle_vote(session_id: str, vote_message: Dict[str, Any]):
                     )
                 )
             except RuntimeError as e:
-                print(f"调度 trigger_robot_votes 失败: {e}")
+                print(f"Failed to schedule trigger_robot_votes: {e}")
 
 
-# ==================== 共识逻辑 ====================
+# ==================== Consensus logic ====================
 
 async def check_and_start_consensus(session_id: str):
-    """检查是否可以开始共识"""
+    """Start consensus if all required nodes are now connected."""
     session = get_session(session_id)
     if not session:
         return
@@ -750,34 +754,33 @@ async def check_and_start_consensus(session_id: str):
     config = session["config"]
     connected_count = len(connected_nodes.get(session_id, []))
     
-    # 如果连接节点数达到要求，开始共识
     if connected_count >= config["nodeCount"]:
         await start_consensus(session_id)
 
 async def start_consensus(session_id: str):
     """
-    开始共识过程 - HotStuff 第一轮共识的初始化
-    
-    对于第一个 View（View 0），Leader 直接发送 Proposal（不需要 New-View）
+    Initialise the first round of HotStuff consensus.
+
+    For View 0 the Leader sends a Proposal directly without a preceding New-View.
     """
     session = get_session(session_id)
     if not session:
         return
     
     session["status"] = "running"
-    session["phase"] = "new-view"  # HotStuff 第一阶段是 new-view
+    session["phase"] = "new-view"   # First HotStuff phase
     session["phase_step"] = 0
-    
-    print(f"会话 {session_id} 开始 HotStuff 共识流程 (View 0)")
-    
-    # 通知所有节点进入 new-view 阶段
+
+    print(f"Session {session_id}: starting HotStuff consensus (View 0)")
+
+    # Notify all nodes to enter the new-view phase
     await sio.emit('phase_update', {
         "phase": "new-view",
         "step": 0,
         "leader": session["leader_id"],
         "view": session["current_view"]
     }, room=session_id)
-    
+
     async def _prep_cb(s, r, v):
         await handle_robot_prepare(s, r, v, handle_vote_cb=handle_vote)
     await robot_send_pre_prepare(
@@ -789,7 +792,7 @@ async def start_consensus(session_id: str):
     )
 
 async def start_prepare_phase(session_id: str):
-    """开始准备阶段"""
+    """Enter the Prepare phase."""
     session = get_session(session_id)
     if not session:
         return
@@ -799,17 +802,17 @@ async def start_prepare_phase(session_id: str):
     
     config = session["config"]
     
-    # 通知所有节点进入准备阶段
+    # Notify all nodes to enter the Prepare phase
     await sio.emit('phase_update', {
         "phase": "prepare",
         "step": 1,
         "isMyTurn": True
     }, room=session_id)
-    
-    print(f"会话 {session_id} 进入准备阶段")
+
+    print(f"Session {session_id} entered Prepare phase")
 
 async def check_prepare_phase(session_id: str):
-    """检查准备阶段是否完成"""
+    """Check whether the Prepare phase has collected enough votes to advance."""
     session = get_session(session_id)
     if not session:
         return
@@ -817,30 +820,29 @@ async def check_prepare_phase(session_id: str):
     config = session["config"]
     prepare_messages = session["messages"]["prepare"]
     
-    # 计算故障节点数 f = floor((n-1)/3)
+    # f = floor((n-1)/3); quorum threshold = 2f+1
     n = config["nodeCount"]
     f = (n - 1) // 3
-    required_correct_messages = 2 * f + 1  # 需要2f+1个正确消息
-    
-    # 统计发送正确信息的不同节点（value=0）
+    required_correct_messages = 2 * f + 1
+
+    # Count distinct nodes that sent the correct value
     correct_nodes = set()
     for msg in prepare_messages:
-        if msg.get("value") == config["proposalValue"]:  # 正确信息
+        if msg.get("value") == config["proposalValue"]:
             correct_nodes.add(msg["from"])
-    
-    print(f"准备阶段检查 - 总节点数: {n}, 故障节点数: {f}")
-    print(f"准备阶段检查 - 需要正确消息数: {required_correct_messages}, 实际正确消息节点数: {len(correct_nodes)}")
-    print(f"准备阶段检查 - 发送正确消息的节点: {correct_nodes}")
-    
-    # 检查是否收到足够多的正确消息
+
+    print(f"Prepare phase check — total nodes: {n}, faulty tolerance: {f}")
+    print(f"Prepare phase check — required: {required_correct_messages}, received: {len(correct_nodes)}")
+    print(f"Prepare phase check — correct-vote nodes: {correct_nodes}")
+
     if len(correct_nodes) >= required_correct_messages:
-        print(f"准备阶段完成（收到{len(correct_nodes)}个正确消息），进入提交阶段")
+        print(f"Prepare phase complete ({len(correct_nodes)} correct votes) — advancing to Commit phase")
         await start_commit_phase(session_id)
     else:
-        print(f"准备阶段未完成，还需要 {required_correct_messages - len(correct_nodes)} 个正确消息")
+        print(f"Prepare phase waiting — still need {required_correct_messages - len(correct_nodes)} more correct votes")
 
 async def start_commit_phase(session_id: str):
-    """开始提交阶段"""
+    """Enter the Commit phase."""
     session = get_session(session_id)
     if not session:
         return
@@ -848,20 +850,20 @@ async def start_commit_phase(session_id: str):
     session["phase"] = "commit"
     session["phase_step"] = 2
     
-    # 通知所有节点进入提交阶段
+    # Notify all nodes to enter the Commit phase
     await sio.emit('phase_update', {
         "phase": "commit",
         "step": 2,
         "isMyTurn": True
     }, room=session_id)
-    
-    print(f"会话 {session_id} 进入提交阶段")
-    
-    # 通知所有机器人节点检查是否可以发送提交消息
-    await check_robot_nodes_ready_for_commit(session_id)  # 占位，HotStuff 由 QC 推进
+
+    print(f"Session {session_id} entered Commit phase")
+
+    # Placeholder — in HotStuff the phase is driven by QC, not by this check
+    await check_robot_nodes_ready_for_commit(session_id)
 
 async def check_commit_phase(session_id: str):
-    """检查提交阶段是否完成"""
+    """Check whether the Commit phase has reached a decision."""
     session = get_session(session_id)
     if not session:
         return
@@ -869,45 +871,41 @@ async def check_commit_phase(session_id: str):
     config = session["config"]
     commit_messages = session["messages"]["commit"]
     
-    # 计算故障节点数 f = floor((n-1)/3)
+    # f = floor((n-1)/3)
     n = config["nodeCount"]
     f = (n - 1) // 3
-    
-    # 统计发送正确信息和错误信息的不同节点
+
+    # Tally correct vs. incorrect votes from distinct nodes
     correct_nodes = set()
     error_nodes = set()
-    
+
     for msg in commit_messages:
-        if msg.get("value") == config["proposalValue"]:  # 正确信息
+        if msg.get("value") == config["proposalValue"]:
             correct_nodes.add(msg["from"])
-        else:  # 错误信息
+        else:
             error_nodes.add(msg["from"])
-    
-    print(f"提交阶段检查 - 总节点数: {n}, 故障节点数: {f}")
-    print(f"提交阶段检查 - 发送正确消息的节点数: {len(correct_nodes)}")
-    print(f"提交阶段检查 - 发送错误消息的节点数: {len(error_nodes)}")
-    print(f"提交阶段检查 - 正确消息节点: {correct_nodes}")
-    print(f"提交阶段检查 - 错误消息节点: {error_nodes}")
-    print(f"提交阶段检查 - 需要正确消息数: {2*f+1}, 需要错误消息数: {f+1}")
-    
-    # 判断共识结果（基于正确/错误消息数量）
-    if len(correct_nodes) >= 2 * f + 1:  # 包括自己，需要2f+1个正确消息
-        print(f"共识成功 - 收到{len(correct_nodes)}个正确消息（需要{2*f+1}个）")
-        print(f"发送共识结果: 共识成功")
+
+    print(f"Commit phase check — total nodes: {n}, faulty tolerance: {f}")
+    print(f"Commit phase check — correct votes: {len(correct_nodes)}, incorrect votes: {len(error_nodes)}")
+    print(f"Commit phase check — correct-vote nodes: {correct_nodes}")
+    print(f"Commit phase check — incorrect-vote nodes: {error_nodes}")
+    print(f"Commit phase check — thresholds: success={2*f+1}, failure={f+1}")
+
+    if len(correct_nodes) >= 2 * f + 1:
+        print(f"Consensus SUCCESS — {len(correct_nodes)} correct votes (needed {2*f+1})")
         await finalize_consensus(session_id, "Consensus Success", f"Received {len(correct_nodes)} valid messages")
-    elif len(error_nodes) >= f + 1:  # 包括自己，需要f+1个错误消息
-        print(f"共识失败 - 收到{len(error_nodes)}个错误消息（需要{f+1}个）")
-        print(f"发送共识结果: 共识失败")
+    elif len(error_nodes) >= f + 1:
+        print(f"Consensus FAILED — {len(error_nodes)} incorrect votes (needed {f+1})")
         await finalize_consensus(session_id, "Consensus Failed", f"Received {len(error_nodes)} invalid messages")
     else:
-        print(f"提交阶段等待中 - 正确消息:{len(correct_nodes)}, 错误消息:{len(error_nodes)}")
+        print(f"Commit phase waiting — correct: {len(correct_nodes)}, incorrect: {len(error_nodes)}")
 
 async def finalize_consensus(session_id: str, status: str = "Consensus Completed", description: str = "Consensus completed"):
     """
-    完成共识（HotStuff Decide 阶段达成共识）
-    
-    注意：HotStuff 中，一旦进入 Decide 阶段即达成共识，不会再有下一"轮"
-    如果需要继续共识新的提案，应该开始新的 View（通过 New-View 机制）
+    Finalise consensus (HotStuff Decide phase).
+
+    Note: in HotStuff, entering the Decide phase means consensus is reached for
+    this value.  Subsequent proposals require a new View (via New-View mechanism).
     """
     session = get_session(session_id)
     if not session:
@@ -915,23 +913,23 @@ async def finalize_consensus(session_id: str, status: str = "Consensus Completed
 
     current_view = session["current_view"]
     if session.get("consensus_finalized_view") == current_view:
-        print(f"View {current_view} 共识已完成，跳过重复调用")
+        print(f"View {current_view} already finalised — skipping duplicate call")
         return
 
-    # 取消超时任务（副作用仍由网络层负责）
+    # Cancel the view timeout task (network-layer side-effects remain the network's responsibility)
     if session.get("timeout_task"):
         session["timeout_task"].cancel()
-        print(f"View {current_view} 共识已完成，取消超时任务")
+        print(f"View {current_view} finalised — timeout task cancelled")
 
-    # 交给 ConsensusService 计算并更新共识结果与 Shadow 复杂度
+    # Delegate result computation and stats to ConsensusService
     result = consensus_service.finalize_consensus_state(session, status, description)
     consensus_result = result["consensus_result"]
     history_item = result["history_item"]
 
-    # 控制台报告已在 Service 内部打印，这里只负责网络广播和持久化
-    print(f"准备发送共识结果: {consensus_result}")
+    # Console reporting is done inside the Service; here we only broadcast and persist
+    print(f"Broadcasting consensus result: {consensus_result}")
     await sio.emit("consensus_result", consensus_result, room=session_id)
-    print(f"已发送共识结果到房间: {session_id}")
+    print(f"Consensus result sent to room: {session_id}")
 
     await sio.emit(
         "phase_update",
@@ -943,39 +941,38 @@ async def finalize_consensus(session_id: str, status: str = "Consensus Completed
         room=session_id,
     )
 
-    print(f"会话 {session_id} View {session['current_view']} 共识完成: {status}")
+    print(f"Session {session_id} view {session['current_view']} consensus done: {status}")
 
     is_simulation = session.get("config", {}).get("is_simulation", False)
-    
+
     if not is_simulation:
-        # 只有正常演示模式才写入数据库
+        # Demo mode only: persist to database and schedule the next round
         try:
             database.append_history(session_id, history_item)
             database.upsert_session(session_id, session)
         except Exception as e:
-            print(f"[database] 保存失败: {e}")
-        
-        # 只有正常演示模式才自动开启下一轮
-        print(f"当前轮次共识完成，10秒后自动开始下一轮...")
+            print(f"[database] Save failed: {e}")
+
+        print(f"Round complete — next round starts in 10 seconds...")
         asyncio.create_task(start_next_round(session_id))
     else:
-        # 仿真模式下，打断链条，绝不触发下一轮和数据库写入
-        print(f"[Simulation] 本轮仿真完成，销毁幽灵任务。")
+        # Simulation mode: break the chain — never trigger a next round or DB write
+        print(f"[Simulation] Round complete — ghost task discarded.")
 
 async def handle_consensus_timeout(session_id: str, view: int):
     """
-    处理共识超时（HotStuff View Change 机制）
-    
-    超时不代表失败，而是触发 View Change：
-    1. 所有节点发送 NEW-VIEW 消息给 Next Leader
-    2. Next Leader 收集 2f+1 个 NEW-VIEW 消息后选出 HighQC
-    3. 进入下一个视图继续共识
-    
-    参数:
-        session_id: 会话ID
-        view: 超时的视图号
+    Handle a consensus timeout (HotStuff View-Change mechanism).
+
+    A timeout is NOT a failure — it triggers a View Change:
+    1. All nodes send NEW-VIEW messages to the Next Leader.
+    2. The Next Leader collects 2f+1 NEW-VIEW messages and picks the HighQC.
+    3. Consensus continues in the new view.
+
+    Args:
+        session_id: Session identifier.
+        view:       The view number that timed out.
     """
-    # 仿真模式下缩短超时时间，加快判定网络严重丢包
+    # Simulation mode uses a shorter timeout to quickly detect severe packet loss
     session = get_session(session_id)
     if not session:
         return
@@ -987,23 +984,22 @@ async def handle_consensus_timeout(session_id: str, view: int):
     if not session:
         return
     
-    # 检查是否仍然在同一视图且未完成共识
+    # Only trigger if still in the same view and not yet finalised
     if session["current_view"] == view and session["status"] == "running":
-        print(f"View {view} 共识超时（40秒未完成），触发 View Change")
-        
-        # 清除超时任务引用
+        print(f"View {view} timed out (no consensus after {timeout_seconds}s) — triggering View Change")
+
         session["timeout_task"] = None
-        
-        # 触发 View Change（HotStuff Liveness 机制）
+
+        # Trigger View Change (HotStuff Liveness guarantee)
         await trigger_view_change(session_id, view)
 
 async def process_message_buffer(session_id: str, view: int):
     """
-    处理消息缓冲池：取出指定视图的缓冲消息并重新处理（消息缓冲机制）
-    
-    参数:
-        session_id: 会话ID
-        view: 要处理的视图号
+    Drain the message buffer for the given view and re-process each buffered message.
+
+    Args:
+        session_id: Session identifier.
+        view:       The view whose buffered messages should be re-processed.
     """
     session = get_session(session_id)
     if not session:
@@ -1013,39 +1009,36 @@ async def process_message_buffer(session_id: str, view: int):
     if not buffer:
         return
     
-    print(f"处理 View {view} 的缓冲消息...")
-    
-    # 遍历所有节点的缓冲消息
+    print(f"Processing buffered messages for view {view}...")
+
     for node_id, node_buffer in buffer.items():
         if view not in node_buffer:
             continue
-        
+
         messages = node_buffer[view]
-        print(f"节点 {node_id} 的 View {view} 缓冲中有 {len(messages)} 条消息")
-        
-        # 处理每条缓冲消息
+        print(f"Node {node_id} has {len(messages)} buffered message(s) for view {view}")
+
         for buffered_msg in messages:
             msg_type = buffered_msg.get("type")
             msg = buffered_msg.get("msg")
-            
+
             if msg_type == "proposal":
-                # 重新处理 Proposal 消息
                 await handle_proposal_message(session_id, msg, node_id)
             elif msg_type == "vote":
-                # 重新处理 Vote 消息
                 await handle_vote(session_id, msg)
-        
-        # 清除已处理的消息
+
+        # Clear processed messages
         del node_buffer[view]
-    
-    print(f"View {view} 的缓冲消息处理完成")
+
+    print(f"Buffered messages for view {view} processed")
 
 async def trigger_view_change(session_id: str, old_view: int):
     """
-    触发 View Change（HotStuff New-View 机制）
-    
-    所有节点发送 NEW-VIEW 消息给 Next Leader，携带自己最高的 prepareQC
-    Next Leader 收集 2f+1 个 NEW-VIEW 消息后，选择最高的 HighQC 并发送 Proposal
+    Trigger a View Change (HotStuff New-View mechanism).
+
+    All nodes send NEW-VIEW messages to the Next Leader, each carrying their
+    highest prepareQC.  Once the leader collects 2f+1 NEW-VIEW messages it
+    selects the highest HighQC and sends a new Proposal.
     """
     session = get_session(session_id)
     if not session:
@@ -1055,23 +1048,23 @@ async def trigger_view_change(session_id: str, old_view: int):
     n = session["config"]["nodeCount"]
     next_leader_id = get_current_leader(session, new_view)
     
-    print(f"触发 View Change: View {old_view} -> View {new_view} (Next Leader: {next_leader_id})")
-    
-    # 更新当前视图
+    print(f"View Change: view {old_view} → view {new_view} (Next Leader: {next_leader_id})")
+
+    # Advance the session view
     session["current_view"] = new_view
     session["leader_id"] = next_leader_id
-    
-    # 重置所有机器人节点的投票状态（交给 RobotAgent 管理）
-    print(f"[View Change] 重置所有机器人节点的投票状态...")
+
+    # Reset all robot-node vote states for the new view
+    print(f"[View Change] Resetting robot node vote states...")
     robot_agent.reset_states_for_view_change(session)
     for robot_id in session.get("robot_nodes", []):
-        print(f"  机器人节点 {robot_id}: 投票状态已重置")
-    
-    # 所有节点发送 NEW-VIEW 消息给 Next Leader
+        print(f"  Robot node {robot_id}: vote state reset")
+
+    # Every node sends a NEW-VIEW message to the Next Leader
     for node_id in range(n):
         node_state = session["node_states"].get(node_id, {})
-        highQC = node_state.get("highQC")  # 节点最高的 prepareQC
-        
+        highQC = node_state.get("highQC")   # This node's highest prepareQC
+
         current_round = session.get("current_round", 1)
         new_view_msg = {
             "from": node_id,
@@ -1079,111 +1072,107 @@ async def trigger_view_change(session_id: str, old_view: int):
             "type": "new_view",
             "view": new_view,
             "old_view": old_view,
-            "round": current_round,  # 使用当前轮次标记消息
-            "highQC": highQC,  # 携带最高的 QC
+            "round": current_round,     # Tag with current round
+            "highQC": highQC,           # Carry the highest known QC
             "timestamp": datetime.now().isoformat()
         }
         
         session["messages"]["new_view"].append(new_view_msg)
         
-        # 如果是机器人节点，直接在后端处理；如果是人类节点，通过 WebSocket 发送
+        # Robot nodes are handled in-process; human nodes receive via WebSocket
         if node_id in session.get("robot_nodes", []):
-            # 机器人节点：直接在后端记录
-            print(f"节点 {node_id}: 发送 NEW-VIEW 消息给 Next Leader {next_leader_id} (highQC.view={highQC.get('view') if highQC else None})")
+            print(f"Node {node_id}: NEW-VIEW → Next Leader {next_leader_id} (highQC.view={highQC.get('view') if highQC else None})")
         else:
-            # 人类节点：通过 WebSocket 发送
             node_sid = node_sockets.get(session_id, {}).get(node_id)
             if node_sid:
                 if should_deliver_message(session_id):
                     await sio.emit('message_received', new_view_msg, room=node_sid)
                 else:
-                    print(f"[网络模拟] 节点 {node_id} 的 NEW-VIEW 消息被丢弃 (目标: Next Leader {next_leader_id}, 传递率: {session['config'].get('messageDeliveryRate', 100)}%)")
-        
-        # Leader 收集 NEW-VIEW 消息
+                    print(f"[Network sim] Node {node_id} NEW-VIEW dropped (target: Next Leader {next_leader_id}, delivery rate: {session['config'].get('messageDeliveryRate', 100)}%)")
+
+        # Leader does not send NEW-VIEW to itself
         if node_id == next_leader_id:
-            continue  # Leader 不给自己发送
+            continue
         
         pending_new_views = session.setdefault("pending_new_views", {})
         if new_view not in pending_new_views:
             pending_new_views[new_view] = {}
         pending_new_views[new_view][node_id] = new_view_msg
         
-        # 统计每个节点发送给 Leader 的 NEW-VIEW 消息（包含机器人和人类）
+        # Count each NEW-VIEW message sent (robot and human alike)
         count_message_sent(session_id, is_broadcast=False)
-    
-    # 通知所有节点进入 New-View 阶段
+
+    # Notify all nodes to enter the new-view phase
     await sio.emit('phase_update', {
         "phase": "new-view",
         "step": 0,
         "leader": next_leader_id,
         "view": new_view
     }, room=session_id)
-    
-    # Next Leader 检查是否已收集到足够的 NEW-VIEW 消息并开始新视图共识
+
+    # Check whether the Next Leader has already collected enough NEW-VIEW messages
     await start_new_view_consensus(session_id, new_view)
-    
-    # 处理消息缓冲池：取出当前新 View 的消息并重新处理（消息缓冲机制）
-    # 注意：在视图切换完成后处理缓冲消息，确保消息在正确的视图上下文中处理
+
+    # Drain the message buffer for the new view now that the view-change is complete.
+    # Messages are processed in the correct view context only after the switch.
     buffer = session.get("message_buffer", {})
     if new_view in buffer:
         buffered_votes = buffer[new_view]
-        print(f"View {new_view} 缓冲中有 {len(buffered_votes)} 条投票消息，开始重新处理")
+        print(f"View {new_view} buffer has {len(buffered_votes)} vote message(s) — re-processing")
         for vote_msg in buffered_votes:
             await handle_vote(session_id, vote_msg)
-        # 清除已处理的消息
         del buffer[new_view]
 
 async def start_next_round(session_id: str):
-    """启动下一轮共识"""
+    """Start the next consensus round (demo mode only)."""
     session = get_session(session_id)
     if not session:
         return
     if session.get("config", {}).get("is_simulation", False):
-        return  # 终极防御：如果是仿真模式，绝对不允许执行下一轮逻辑！
-    # 普通演示模式保留 10 秒间隔
+        return  # Ultimate guard: simulation mode must never trigger a next round
+    # Demo mode: 10-second pause between rounds
     await asyncio.sleep(10.0)
     
     session = get_session(session_id)
     if not session:
         return
     
-    # 增加轮次和视图（HotStuff视图轮换）
+    # Advance round and view counters
     session["current_round"] += 1
     session["current_view"] += 1
     current_round = session["current_round"]
-    # 记录本轮次的起始视图，用于统计 View Change 次数
+    # Record the starting view of this round (used to count view-changes per round)
     session["start_view_of_round"] = session["current_view"]
-    # 根据当前视图更新 Leader
+    # Update leader for the new view
     session["leader_id"] = get_current_leader(session)
-    
-    # 重置会话状态
+
+    # Reset session state for the new round
     session["status"] = "running"
     session["phase"] = "pre-prepare"
     session["phase_step"] = 0
     session["consensus_result"] = None
-    # 重置网络统计（每轮重新开始统计）
+    # Reset per-round network stats
     session["network_stats"] = {
         "total_messages_sent": 0,
         "phases_count": 0
     }
-    
-    # 不再清空消息，保留历史轮次的消息
-    # 所有消息通过 round 字段区分不同轮次
-    # session["messages"] 保持累积，不清空
-    
-    # 节点状态持久化：保持 robot_nodes 和 human_nodes 列表不变
-    # 如果用户在第一轮选择了"Normal Consensus (托管给机器人)"或保持"Human Mode"，
-    # 这个状态必须在后续轮次继续保持，不要重置回默认状态
-    print(f"第{current_round}轮开始 - 保持节点状态持久化")
-    print(f"第{current_round}轮开始 - 当前机器人节点: {session['robot_nodes']}")
-    print(f"第{current_round}轮开始 - 当前人类节点: {session['human_nodes']}")
-    
-    # 重置机器人节点状态（重置所有机器人节点的投票状态，但保持节点身份不变）
+
+    # Message history is intentionally kept cumulative across rounds;
+    # the `round` field on each message is used to filter by round.
+
+    # Persist node identity across rounds — do NOT reset robot_nodes / human_nodes.
+    # A human node that chose "Normal Consensus" in round 1 should stay in robot mode
+    # for subsequent rounds; a human node that stayed in "Human Mode" should remain so.
+    print(f"Round {current_round} start — preserving node identities")
+    print(f"Round {current_round} — robot nodes: {session['robot_nodes']}")
+    print(f"Round {current_round} — human nodes: {session['human_nodes']}")
+
+    # Reset robot-node vote states (identity preserved; only vote flags reset)
     robot_agent.reset_states_for_new_round(session)
-    
-    print(f"会话 {session_id} 开始第{current_round}轮共识")
-    
-    # 通知所有节点（包括等待中的人类节点）进入新一轮共识
+
+    print(f"Session {session_id} starting round {current_round}")
+
+    # Notify all nodes (including waiting human nodes) that a new round has started
     await sio.emit('new_round', {
         "round": current_round,
         "view": session["current_view"],
@@ -1192,23 +1181,25 @@ async def start_next_round(session_id: str):
         "step": 0
     }, room=session_id)
     
-    # 通知所有节点进入预准备阶段
+    # Notify all nodes to enter the pre-prepare phase
     await sio.emit('phase_update', {
         "phase": "pre-prepare",
         "step": 0,
         "isMyTurn": False
     }, room=session_id)
-    
-    print(f"第{current_round}轮开始，所有节点（包括新加入的人类节点）现在可以参与共识")
 
-    # 持久化新一轮开始时的会话状态（仿真模式下跳过）
+    print(f"Round {current_round} started — all nodes (including newly joined human nodes) may now participate")
+
+    # Persist the new-round state (skipped in simulation mode)
     if not session.get("config", {}).get("is_simulation"):
         try:
             database.upsert_session(session_id, session)
         except Exception as e:
-            print(f"[database] 保存新一轮会话状态失败: session_id={session_id}, error={e}")
-    
-    # 机器人提议者发送预准备消息（注意：HotStuff 中应该通过 View Change 继续，而不是"下一轮"）
+            print(f"[database] Failed to save new-round session state: session_id={session_id}, error={e}")
+
+    # Robot proposer sends pre-prepare message
+    # Note: in HotStuff, subsequent proposals should ideally go through View Change,
+    # but this simpler "next round" path is kept for the demo multi-round flow.
     async def _prep_cb(s, r, v):
         await handle_robot_prepare(s, r, v, handle_vote_cb=handle_vote)
     await robot_send_pre_prepare(
@@ -1220,47 +1211,46 @@ async def start_next_round(session_id: str):
     )
 
 async def broadcast_to_online_nodes(session_id: str, event: str, data: Any):
-    """只向在线的人类节点广播消息，机器人节点总是在线"""
+    """Broadcast an event only to connected human nodes (robot nodes are handled in-process)."""
     session = get_session(session_id)
     if not session:
         return
-    
-    # 向所有在线的人类节点发送
+
     if session_id in node_sockets:
         for node_id, sid in node_sockets[session_id].items():
-            if node_id in session["human_nodes"]:  # 只向人类节点发送
+            if node_id in session["human_nodes"]:
                 await sio.emit(event, data, room=sid)
-    
-    # 机器人节点不需要接收WebSocket消息，因为它们在后端自动处理
+
+    # Robot nodes do not receive WebSocket messages — they are driven by backend logic
 
 
 async def start_hotstuff_process(session_id: str):
     """
-    启动 HotStuff 共识流程
-    
-    对于第一个 View（View 0），Leader 直接发送 Proposal（不需要 New-View）
+    Start the HotStuff consensus process (called as a callback from robot_agent).
+
+    For View 0 the Leader sends a Proposal directly without a preceding New-View.
     """
     session = get_session(session_id)
     if not session:
         return
     
-    # 更新会话状态
+    # Set initial session state
     session["status"] = "running"
-    session["phase"] = "new-view"  # HotStuff 第一阶段是 new-view
+    session["phase"] = "new-view"   # First HotStuff phase
     session["phase_step"] = 0
-    # 记录第一轮次的起始视图
+    # Record the starting view for this round (used to count view-changes)
     if "start_view_of_round" not in session:
         session["start_view_of_round"] = session["current_view"]
-    
-    # 通知所有节点进入 new-view 阶段
+
+    # Notify all nodes to enter the new-view phase
     await sio.emit('phase_update', {
         "phase": "new-view",
         "step": 0,
         "leader": session["leader_id"],
         "view": session["current_view"]
     }, room=session_id)
-    
-    print(f"会话 {session_id} 开始 HotStuff 共识流程 (View {session['current_view']})")
+
+    print(f"Session {session_id}: starting HotStuff consensus (view {session['current_view']})")
     
     async def _prep_cb(s, r, v):
         await handle_robot_prepare(s, r, v, handle_vote_cb=handle_vote)
@@ -1274,9 +1264,10 @@ async def start_hotstuff_process(session_id: str):
 
 async def start_new_view_consensus(session_id: str, view: int):
     """
-    开始新视图的共识（HotStuff New-View 机制）
-    
-    如果 Leader 已收集到 2f+1 个 NEW-VIEW 消息，则选择最高的 HighQC 并发送 Proposal
+    Start consensus for a new view (HotStuff New-View mechanism).
+
+    If the leader has already collected 2f+1 NEW-VIEW messages, it selects the
+    highest HighQC and sends a Proposal for the new view.
     """
     session = get_session(session_id)
     if not session:
@@ -1290,10 +1281,10 @@ async def start_new_view_consensus(session_id: str, view: int):
     threshold = 2 * f + 1
     
     if len(pending_new_views) < threshold:
-        print(f"View {view}: Leader {leader_id} 仅收集到 {len(pending_new_views)}/{threshold} 个 NEW-VIEW 消息，等待更多")
+        print(f"View {view}: Leader {leader_id} has {len(pending_new_views)}/{threshold} NEW-VIEW messages — waiting for more")
         return
-    
-    # 选择最高的 HighQC（New-View 机制的核心）
+
+    # Select the highest HighQC from all received NEW-VIEW messages (core of New-View)
     highQC = None
     max_view = -1
     for node_id, new_view_msg in pending_new_views.items():
@@ -1304,9 +1295,9 @@ async def start_new_view_consensus(session_id: str, view: int):
                 max_view = qc_view
                 highQC = qc
     
-    print(f"View {view}: Leader {leader_id} 选出 HighQC (view={max_view})，开始发送 Proposal")
-    
-    # 如果 Leader 是机器人节点，自动发送 Proposal
+    print(f"View {view}: Leader {leader_id} selected HighQC (view={max_view}) — sending Proposal")
+
+    # If the leader is a robot node, send the Proposal automatically
     if leader_id in session.get("robot_nodes", []):
         async def _prep_cb(s, r, v):
             await handle_robot_prepare(s, r, v, handle_vote_cb=handle_vote)
@@ -1318,5 +1309,5 @@ async def start_new_view_consensus(session_id: str, view: int):
             handle_robot_prepare_cb=_prep_cb,
         )
     else:
-        print(f"View {view}: Leader {leader_id} 是人类节点，等待手动发送 Proposal")
+        print(f"View {view}: Leader {leader_id} is a human node — waiting for manual Proposal")
 
